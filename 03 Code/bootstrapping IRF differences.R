@@ -1,0 +1,2724 @@
+########################################################################
+# LP-IV SUBSAMPLE COMPARISON - Time-cluster Bootstrap
+# Pre-financialization (1994-2003) vs Post-financialization (2010-2025)
+#
+# ARCHITECTURE:
+# - First stage: run SEPARATELY for each subsample on time series
+#   d_gs1 ~ shock + macro_controls (ip_growth, inflation lags only)
+#   Macro controls only because d_gs1 is not commodity-specific
+#
+# - Second stage: run SEPARATELY for each subsample
+#   dep_h ~ d_gs1_hat + full_controls
+#   Full controls include commodity-specific lags applied here only
+#
+# - Bootstrap: time-cluster bootstrap on SECOND STAGE only
+#   First stage fitted values fixed within each bootstrap replication
+#   Dates resampled separately for pre and post subsamples
+########################################################################
+
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+library(purrr)
+library(lubridate)
+
+input  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\DTA"
+output <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\04 Output - figures and tables\\04 bootstrapping\\"
+
+if (!dir.exists(output)) dir.create(output, recursive = TRUE)
+
+########################################################################
+# LOAD DATA
+########################################################################
+
+df <- read_dta(paste0(input, "\\master_panel_gs1.dta"))
+
+df <- df %>%
+  mutate(
+    date    = as.Date("1960-01-01") %m+% months(as.integer(date)),
+    date_ym = format(date, "%Y-%m")
+  )
+
+if (!"d_gs1" %in% names(df)) stop("d_gs1 not found")
+cat("d_gs1 found. Non-NA obs:", sum(!is.na(df$d_gs1)), "\n")
+cat("Unique commodities:", paste(unique(df$commodity), collapse = ", "), "\n")
+cat("Date range:", format(min(df$date)), "to", format(max(df$date)), "\n")
+
+df <- df %>%
+  mutate(
+    gfc     = as.integer(date >= as.Date("2008-09-01") &
+                           date <= as.Date("2009-06-01")),
+    covid   = as.integer(date >= as.Date("2020-03-01") &
+                           date <= as.Date("2021-06-01")),
+    ukraine = as.integer(date >= as.Date("2022-02-01") &
+                           date <= as.Date("2022-12-01"))
+  )
+
+########################################################################
+# PARAMETERS
+########################################################################
+
+lags        <- 4
+horizon     <- 24
+breps       <- 500
+commodities <- c("Coffee", "Copper", "Gold", "Oil", "Soybeans", "Wheat")
+
+curr_controls <- list(
+  Coffee   = "d_brl",
+  Copper   = "d_clp",
+  Gold     = "d_aud",
+  Oil      = NULL,
+  Soybeans = "d_brl",
+  Wheat    = NULL
+)
+
+crisis_vars <- list(
+  Coffee   = c("gfc", "covid"),
+  Copper   = c("gfc", "covid"),
+  Gold     = c("gfc", "covid"),
+  Oil      = c("gfc", "covid", "ukraine"),
+  Soybeans = c("gfc", "covid", "ukraine"),
+  Wheat    = c("gfc", "covid", "ukraine")
+)
+
+pre_start  <- as.Date("1994-01-01")
+pre_end    <- as.Date("2003-12-01")
+post_start <- as.Date("2010-01-01")
+post_end   <- as.Date("2025-12-01")
+
+########################################################################
+# PRE-COMPUTE ALL LAGS ON FULL DATA
+########################################################################
+
+cat("=== Pre-computing lags ===\n")
+
+df <- df %>%
+  arrange(commodity, date) %>%
+  group_by(commodity) %>%
+  mutate(
+    lag1_dlp       = dplyr::lag(d_log_price, 1),
+    lag2_dlp       = dplyr::lag(d_log_price, 2),
+    lag3_dlp       = dplyr::lag(d_log_price, 3),
+    lag4_dlp       = dplyr::lag(d_log_price, 4),
+    lag1_ip_growth = dplyr::lag(ip_growth,   1),
+    lag2_ip_growth = dplyr::lag(ip_growth,   2),
+    lag3_ip_growth = dplyr::lag(ip_growth,   3),
+    lag4_ip_growth = dplyr::lag(ip_growth,   4),
+    lag1_inflation = dplyr::lag(inflation,   1),
+    lag2_inflation = dplyr::lag(inflation,   2),
+    lag3_inflation = dplyr::lag(inflation,   3),
+    lag4_inflation = dplyr::lag(inflation,   4),
+    lag1_d_brl     = dplyr::lag(d_brl,       1),
+    lag2_d_brl     = dplyr::lag(d_brl,       2),
+    lag3_d_brl     = dplyr::lag(d_brl,       3),
+    lag4_d_brl     = dplyr::lag(d_brl,       4),
+    lag1_d_clp     = dplyr::lag(d_clp,       1),
+    lag2_d_clp     = dplyr::lag(d_clp,       2),
+    lag3_d_clp     = dplyr::lag(d_clp,       3),
+    lag4_d_clp     = dplyr::lag(d_clp,       4),
+    lag1_d_aud     = dplyr::lag(d_aud,       1),
+    lag2_d_aud     = dplyr::lag(d_aud,       2),
+    lag3_d_aud     = dplyr::lag(d_aud,       3),
+    lag4_d_aud     = dplyr::lag(d_aud,       4),
+    lag0_gfc       = gfc,
+    lag1_gfc       = dplyr::lag(gfc,         1),
+    lag2_gfc       = dplyr::lag(gfc,         2),
+    lag3_gfc       = dplyr::lag(gfc,         3),
+    lag4_gfc       = dplyr::lag(gfc,         4),
+    lag0_covid     = covid,
+    lag1_covid     = dplyr::lag(covid,       1),
+    lag2_covid     = dplyr::lag(covid,       2),
+    lag3_covid     = dplyr::lag(covid,       3),
+    lag4_covid     = dplyr::lag(covid,       4),
+    lag0_ukraine   = ukraine,
+    lag1_ukraine   = dplyr::lag(ukraine,     1),
+    lag2_ukraine   = dplyr::lag(ukraine,     2),
+    lag3_ukraine   = dplyr::lag(ukraine,     3),
+    lag4_ukraine   = dplyr::lag(ukraine,     4)
+  ) %>%
+  ungroup()
+
+cat("Pre-computation done. Columns:", ncol(df), "\n")
+
+########################################################################
+# FIRST STAGE — run separately for each subsample on time series
+#
+# Uses macro controls only (ip_growth, inflation lags) because:
+# 1. d_gs1 is a macro variable, not commodity-specific
+# 2. slice(1) collapses to one obs per date — commodity controls
+#    would come from whichever commodity is first alphabetically
+#
+# Fitted values are stored as d_gs1_hat_pre and d_gs1_hat_post
+# and merged into the full panel for use in second stage
+########################################################################
+
+cat("=== Running first stages ===\n")
+
+macro_controls <- c(
+  paste0("lag", 1:lags, "_ip_growth"),
+  paste0("lag", 1:lags, "_inflation")
+)
+
+fs_formula <- paste(
+  "d_gs1 ~ shock +",
+  paste(macro_controls, collapse = " + ")
+)
+
+# Helper to run first stage on a subsample time series
+run_first_stage <- function(data, start, end, label) {
+  
+  d_ts <- data %>%
+    filter(date >= start, date <= end) %>%
+    arrange(date) %>%
+    group_by(date) %>%
+    slice(1) %>%
+    ungroup() %>%
+    filter(!is.na(d_gs1), !is.na(shock)) %>%
+    drop_na(any_of(macro_controls))
+  
+  if (nrow(d_ts) < 10) stop(paste("Too few time-series obs for", label))
+  
+  fit <- lm(as.formula(fs_formula), data = d_ts)
+  
+  cat("\n--- First Stage:", label, "---\n")
+  cat("N:", nrow(d_ts), "\n")
+  cat("F-statistic:", round(summary(fit)$fstatistic[1], 2), "\n")
+  cat("R-squared:", round(summary(fit)$r.squared, 4), "\n")
+  cat("shock coef:", round(coef(fit)["shock"], 4),
+      "| t-stat:", round(summary(fit)$coefficients["shock", "t value"], 2), "\n")
+  
+  d_ts$d_gs1_hat <- fitted(fit)
+  return(d_ts %>% select(date, d_gs1_hat))
+}
+
+# Run first stage for each subsample
+fs_pre  <- run_first_stage(df, pre_start,  pre_end,  "Pre  (1994-2003)")
+fs_post <- run_first_stage(df, post_start, post_end, "Post (2010-2025)")
+
+# Merge fitted values into panel — separate columns for pre and post
+df <- df %>%
+  left_join(fs_pre  %>% rename(d_gs1_hat_pre  = d_gs1_hat), by = "date") %>%
+  left_join(fs_post %>% rename(d_gs1_hat_post = d_gs1_hat), by = "date")
+
+cat("\nFirst stage fitted values merged into panel.\n")
+cat("Non-NA d_gs1_hat_pre: ",  sum(!is.na(df$d_gs1_hat_pre)),  "\n")
+cat("Non-NA d_gs1_hat_post:", sum(!is.na(df$d_gs1_hat_post)), "\n")
+
+########################################################################
+# SECOND STAGE HELPER FUNCTION
+#
+# Takes pre-computed d_gs1_hat (from fixed first stage),
+# filters to subsample, applies full commodity-specific controls,
+# returns beta on d_gs1_hat with Newey-West SE
+########################################################################
+
+run_second_stage <- function(data, commodity_name, h, lags,
+                             curr_control, crisis_v,
+                             sub_start, sub_end,
+                             fitted_col) {
+  
+  # Filter to commodity and subsample
+  d <- data %>%
+    filter(
+      commodity == commodity_name,
+      date >= sub_start,
+      date <= sub_end
+    ) %>%
+    arrange(date)
+  
+  dep_var <- paste0("dep_h", h)
+  if (!dep_var %in% names(d)) return(NULL)
+  if (nrow(d) < 10)           return(NULL)
+  
+  # Check fitted values column exists and has data
+  if (!fitted_col %in% names(d))        return(NULL)
+  if (all(is.na(d[[fitted_col]])))      return(NULL)
+  
+  # Rename fitted column to generic name for formula
+  d$d_gs1_hat <- d[[fitted_col]]
+  
+  # Build full second-stage controls
+  # These are commodity-specific — applied in second stage only
+  full_controls <- c(
+    paste0("lag", 1:lags, "_dlp"),
+    paste0("lag", 1:lags, "_ip_growth"),
+    paste0("lag", 1:lags, "_inflation")
+  )
+  if (!is.null(curr_control)) {
+    full_controls <- c(full_controls,
+                       paste0("lag", 1:lags, "_", curr_control))
+  }
+  for (cv in crisis_v) {
+    full_controls <- c(full_controls, paste0("lag", 0:lags, "_", cv))
+  }
+  
+  # Check all control columns exist
+  missing_cols <- setdiff(
+    c(dep_var, "d_gs1_hat", full_controls),
+    names(d)
+  )
+  if (length(missing_cols) > 0) return(NULL)
+  
+  # Drop NAs
+  d <- d %>% drop_na(any_of(c(dep_var, "d_gs1_hat", full_controls)))
+  if (nrow(d) < 10) return(NULL)
+  
+  # Second stage regression
+  ss_formula <- paste(
+    dep_var, "~",
+    paste(c("d_gs1_hat", full_controls), collapse = " + ")
+  )
+  
+  tryCatch({
+    fit <- lm(as.formula(ss_formula), data = d)
+    bw  <- max(1, h)
+    nw  <- NeweyWest(fit, lag = bw, prewhite = FALSE)
+    ct  <- coeftest(fit, vcov = nw)
+    
+    return(list(
+      beta = ct["d_gs1_hat", "Estimate"],
+      n    = nrow(d)
+    ))
+  }, error = function(e) NULL)
+}
+
+########################################################################
+# STEP 1: POINT ESTIMATES
+########################################################################
+
+cat("\n=== Computing point estimates ===\n")
+
+point_estimates <- list()
+
+for (c in commodities) {
+  cat("  Commodity:", c, "\n")
+  for (h in 0:horizon) {
+    
+    res_pre <- run_second_stage(
+      data           = df,
+      commodity_name = c,
+      h              = h,
+      lags           = lags,
+      curr_control   = curr_controls[[c]],
+      crisis_v       = crisis_vars[[c]],
+      sub_start      = pre_start,
+      sub_end        = pre_end,
+      fitted_col     = "d_gs1_hat_pre"
+    )
+    
+    res_post <- run_second_stage(
+      data           = df,
+      commodity_name = c,
+      h              = h,
+      lags           = lags,
+      curr_control   = curr_controls[[c]],
+      crisis_v       = crisis_vars[[c]],
+      sub_start      = post_start,
+      sub_end        = post_end,
+      fitted_col     = "d_gs1_hat_post"
+    )
+    
+    if (!is.null(res_pre) & !is.null(res_post)) {
+      point_estimates[[paste(c, h, sep = "_")]] <- data.frame(
+        commodity = c,
+        horizon   = h,
+        beta_pre  = res_pre$beta,
+        beta_post = res_post$beta,
+        beta_diff = res_post$beta - res_pre$beta,
+        n_pre     = res_pre$n,
+        n_post    = res_post$n
+      )
+    }
+  }
+}
+
+point_df <- bind_rows(point_estimates)
+cat("Point estimates computed:", nrow(point_df), "rows\n")
+print(head(point_df))
+
+########################################################################
+# STEP 2: TIME-CLUSTER BOOTSTRAP ON SECOND STAGE ONLY
+#
+# First stage fitted values are FIXED — we do not resample them.
+# This correctly separates first-stage uncertainty (which we treat
+# as negligible given the full time-series sample) from second-stage
+# uncertainty (which reflects commodity-level sampling variation).
+#
+# Dates resampled SEPARATELY for pre and post to preserve the
+# within-subsample time-series structure of each period.
+# Original dates kept — do NOT reassign dates in bootstrap samples.
+########################################################################
+
+cat("\n=== Running bootstrap (B =", breps, ") ===\n")
+
+dates_pre  <- df %>%
+  filter(date >= pre_start,  date <= pre_end)  %>%
+  pull(date) %>% unique() %>% sort()
+
+dates_post <- df %>%
+  filter(date >= post_start, date <= post_end) %>%
+  pull(date) %>% unique() %>% sort()
+
+nT_pre  <- length(dates_pre)
+nT_post <- length(dates_post)
+
+cat("Pre-period unique dates:", nT_pre, "\n")
+cat("Post-period unique dates:", nT_post, "\n")
+
+boot_results <- list()
+
+for (b in 1:breps) {
+  
+  if (b %% 50 == 0) cat("  Replication", b, "of", breps, "\n")
+  
+  # Resample dates with replacement — separately for each period
+  boot_dates_pre  <- sample(dates_pre,  nT_pre,  replace = TRUE)
+  boot_dates_post <- sample(dates_post, nT_post, replace = TRUE)
+  
+  # Build bootstrap datasets
+  # Keep original dates — pre-computed lags travel correctly with rows
+  # d_gs1_hat_pre and d_gs1_hat_post also travel with rows (fixed FS)
+  boot_df_pre <- map_dfr(seq_along(boot_dates_pre), function(i) {
+    df %>%
+      filter(date == boot_dates_pre[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  boot_df_post <- map_dfr(seq_along(boot_dates_post), function(i) {
+    df %>%
+      filter(date == boot_dates_post[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  for (c in commodities) {
+    for (h in 0:horizon) {
+      
+      res_pre <- run_second_stage(
+        data           = boot_df_pre,
+        commodity_name = c,
+        h              = h,
+        lags           = lags,
+        curr_control   = curr_controls[[c]],
+        crisis_v       = crisis_vars[[c]],
+        sub_start      = pre_start,
+        sub_end        = pre_end,
+        fitted_col     = "d_gs1_hat_pre"
+      )
+      
+      res_post <- run_second_stage(
+        data           = boot_df_post,
+        commodity_name = c,
+        h              = h,
+        lags           = lags,
+        curr_control   = curr_controls[[c]],
+        crisis_v       = crisis_vars[[c]],
+        sub_start      = post_start,
+        sub_end        = post_end,
+        fitted_col     = "d_gs1_hat_post"
+      )
+      
+      if (!is.null(res_pre) & !is.null(res_post)) {
+        boot_results[[length(boot_results) + 1]] <- data.frame(
+          commodity   = c,
+          horizon     = h,
+          rep         = b,
+          beta_pre_b  = res_pre$beta,
+          beta_post_b = res_post$beta,
+          beta_diff_b = res_post$beta - res_pre$beta
+        )
+      }
+    }
+  }
+}
+
+boot_df_results <- bind_rows(boot_results)
+cat("Bootstrap results:", nrow(boot_df_results), "rows\n")
+
+if (nrow(boot_df_results) == 0) {
+  stop("Bootstrap produced no results — check run_second_stage diagnostics")
+}
+
+########################################################################
+# STEP 3: BOOTSTRAP CONFIDENCE BANDS
+########################################################################
+
+cat("=== Computing confidence bands ===\n")
+
+boot_bands <- boot_df_results %>%
+  group_by(commodity, horizon) %>%
+  summarise(
+    nvalid       = n(),
+    lower_diff90 = quantile(beta_diff_b, 0.05,  na.rm = TRUE),
+    lower_diff68 = quantile(beta_diff_b, 0.16,  na.rm = TRUE),
+    upper_diff68 = quantile(beta_diff_b, 0.84,  na.rm = TRUE),
+    upper_diff90 = quantile(beta_diff_b, 0.95,  na.rm = TRUE),
+    lower_pre90  = quantile(beta_pre_b,  0.05,  na.rm = TRUE),
+    lower_pre68  = quantile(beta_pre_b,  0.16,  na.rm = TRUE),
+    upper_pre68  = quantile(beta_pre_b,  0.84,  na.rm = TRUE),
+    upper_pre90  = quantile(beta_pre_b,  0.95,  na.rm = TRUE),
+    lower_post90 = quantile(beta_post_b, 0.05,  na.rm = TRUE),
+    lower_post68 = quantile(beta_post_b, 0.16,  na.rm = TRUE),
+    upper_post68 = quantile(beta_post_b, 0.84,  na.rm = TRUE),
+    upper_post90 = quantile(beta_post_b, 0.95,  na.rm = TRUE),
+    .groups = "drop"
+  )
+
+########################################################################
+# STEP 4: MERGE AND SAVE
+########################################################################
+
+final_df <- point_df %>%
+  left_join(boot_bands, by = c("commodity", "horizon"))
+
+write.csv(final_df,
+          paste0(input, "\\lp_iv_subsample_bootstrap.csv"),
+          row.names = FALSE)
+cat("=== Saved lp_iv_subsample_bootstrap.csv ===\n")
+
+########################################################################
+# STEP 5: PLOT
+########################################################################
+
+cat("=== Plotting ===\n")
+
+caption_base <- paste0(
+  "LP-IV: d_gs1 instrumented by Acosta et al. shock\n",
+  "First stage run separately per subsample on time series ",
+  "(macro controls only)\n",
+  "Second stage: full commodity controls | Newey-West SE\n",
+  "Time-cluster bootstrap on second stage, B=", breps,
+  " | Bands = 16th-84th (68%) and 5th-95th (90%) percentiles"
+)
+
+plot_theme <- theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major = element_line(color = "grey85",
+                                    linetype = "dashed"),
+    panel.grid.minor = element_blank(),
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.caption     = element_text(size = 8, hjust = 1),
+    legend.position  = "bottom",
+    axis.title       = element_text(size = 11)
+  )
+
+for (c in commodities) {
+  
+  d <- final_df %>% filter(commodity == c)
+  
+  # Pre-financialization IRF
+  p_pre <- ggplot(d, aes(x = horizon)) +
+    geom_ribbon(aes(ymin = lower_pre90, ymax = upper_pre90),
+                fill = "blue", alpha = 0.15) +
+    geom_ribbon(aes(ymin = lower_pre68, ymax = upper_pre68),
+                fill = "blue", alpha = 0.30) +
+    geom_line(aes(y = beta_pre),
+              color = "blue", linewidth = 0.8) +
+    geom_hline(yintercept = 0, color = "black") +
+    scale_x_continuous(breaks = seq(0, 24, 4)) +
+    labs(
+      title   = paste0(c, ": LP-IV IRF Pre-Financialization (1994-2003)"),
+      x       = "Months after shock",
+      y       = "Cumulative log price change",
+      caption = caption_base
+    ) +
+    plot_theme
+  
+  ggsave(paste0(output, "irf_", c, "_lpiv_pre_boot.png"),
+         p_pre, width = 10, height = 6, dpi = 200)
+  
+  # Post-financialization IRF
+  p_post <- ggplot(d, aes(x = horizon)) +
+    geom_ribbon(aes(ymin = lower_post90, ymax = upper_post90),
+                fill = "red", alpha = 0.15) +
+    geom_ribbon(aes(ymin = lower_post68, ymax = upper_post68),
+                fill = "red", alpha = 0.30) +
+    geom_line(aes(y = beta_post),
+              color = "red", linewidth = 0.8) +
+    geom_hline(yintercept = 0, color = "black") +
+    scale_x_continuous(breaks = seq(0, 24, 4)) +
+    labs(
+      title   = paste0(c, ": LP-IV IRF Post-Financialization (2010-2025)"),
+      x       = "Months after shock",
+      y       = "Cumulative log price change",
+      caption = caption_base
+    ) +
+    plot_theme
+  
+  ggsave(paste0(output, "irf_", c, "_lpiv_post_boot.png"),
+         p_post, width = 10, height = 6, dpi = 200)
+  
+  # Difference IRF
+  p_diff <- ggplot(d, aes(x = horizon)) +
+    geom_ribbon(aes(ymin = lower_diff90, ymax = upper_diff90),
+                fill = "darkgreen", alpha = 0.15) +
+    geom_ribbon(aes(ymin = lower_diff68, ymax = upper_diff68),
+                fill = "darkgreen", alpha = 0.30) +
+    geom_line(aes(y = beta_diff),
+              color = "darkgreen", linewidth = 0.8) +
+    geom_hline(yintercept = 0, color = "black") +
+    scale_x_continuous(breaks = seq(0, 24, 4)) +
+    labs(
+      title   = paste0(c, ": LP-IV Difference in IRF (Post minus Pre)"),
+      x       = "Months after shock",
+      y       = "Difference in cumulative log price change",
+      caption = paste0(
+        "Negative = stronger negative response post-financialization\n",
+        caption_base
+      )
+    ) +
+    plot_theme
+  
+  ggsave(paste0(output, "irf_", c, "_lpiv_diff_boot.png"),
+         p_diff, width = 10, height = 6, dpi = 200)
+  
+  cat("  Saved:", c, "pre, post, diff\n")
+}
+
+cat("=== Done ===\n")
+
+########################################################################
+# OIL LP-IV SUBSAMPLE ROBUSTNESS
+# Pre: 1994-1997 | Post: 2010-2021
+# Oil-specific: OPEC dummy in pre only, extended Ukraine in post only
+# Reuses fixed first-stage fitted values from main estimation
+########################################################################
+
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+library(purrr)
+library(lubridate)
+
+input  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\DTA"
+output <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\04 Output - figures and tables\\04 bootstrapping\\"
+
+if (!dir.exists(output)) dir.create(output, recursive = TRUE)
+
+########################################################################
+# LOAD DATA — reuse same dataset with pre-computed lags
+########################################################################
+
+df <- read_dta(paste0(input, "\\master_panel_gs1.dta"))
+
+df <- df %>%
+  mutate(
+    date    = as.Date("1960-01-01") %m+% months(as.integer(date)),
+    date_ym = format(date, "%Y-%m")
+  )
+
+if (!"d_gs1" %in% names(df)) stop("d_gs1 not found")
+
+########################################################################
+# DEFINE CRISIS DUMMIES
+########################################################################
+
+df <- df %>%
+  mutate(
+    gfc          = as.integer(date >= as.Date("2008-09-01") &
+                                date <= as.Date("2009-06-01")),
+    covid        = as.integer(date >= as.Date("2020-03-01") &
+                                date <= as.Date("2021-06-01")),
+    ukraine      = as.integer(date >= as.Date("2022-02-01") &
+                                date <= as.Date("2022-12-01")),
+    # OPEC episode — pre-period only contaminant
+    # Asian crisis oil crash + OPEC cut recovery
+    opec_episode = as.integer(date >= as.Date("1997-07-01") &
+                                date <= as.Date("2000-12-01"))
+  )
+
+########################################################################
+# OIL-SPECIFIC SUBSAMPLE BOUNDARIES
+# Pre:  1994-2003 with OPEC dummy to clean supply confounds
+# Post: 2010-2021 — caps before 2022 Ukraine/tightening confound
+#       (2021 end allows 24-month horizon to reach end of 2023)
+########################################################################
+
+pre_start  <- as.Date("1994-01-01")
+pre_end    <- as.Date("2003-12-01")
+post_start <- as.Date("2010-01-01")
+post_end   <- as.Date("2021-12-01")   # capped — 24h horizon reaches 2023
+
+########################################################################
+# PARAMETERS
+########################################################################
+
+lags    <- 4
+horizon <- 24
+breps   <- 500
+
+# Oil crisis vars — OPEC dummy only in pre, standard dummies in post
+# We handle this by passing different crisis_v to pre and post
+crisis_pre  <- c("gfc", "opec_episode")   # gfc not in pre but harmless
+crisis_post <- c("gfc", "covid")          # no ukraine — post ends 2021
+
+########################################################################
+# PRE-COMPUTE LAGS
+########################################################################
+
+cat("=== Pre-computing lags ===\n")
+
+df <- df %>%
+  arrange(commodity, date) %>%
+  group_by(commodity) %>%
+  mutate(
+    lag1_dlp       = dplyr::lag(d_log_price, 1),
+    lag2_dlp       = dplyr::lag(d_log_price, 2),
+    lag3_dlp       = dplyr::lag(d_log_price, 3),
+    lag4_dlp       = dplyr::lag(d_log_price, 4),
+    lag1_ip_growth = dplyr::lag(ip_growth,   1),
+    lag2_ip_growth = dplyr::lag(ip_growth,   2),
+    lag3_ip_growth = dplyr::lag(ip_growth,   3),
+    lag4_ip_growth = dplyr::lag(ip_growth,   4),
+    lag1_inflation = dplyr::lag(inflation,   1),
+    lag2_inflation = dplyr::lag(inflation,   2),
+    lag3_inflation = dplyr::lag(inflation,   3),
+    lag4_inflation = dplyr::lag(inflation,   4),
+    # Crisis lags — pre dummies
+    lag0_gfc          = gfc,
+    lag1_gfc          = dplyr::lag(gfc,          1),
+    lag2_gfc          = dplyr::lag(gfc,          2),
+    lag3_gfc          = dplyr::lag(gfc,          3),
+    lag4_gfc          = dplyr::lag(gfc,          4),
+    lag0_opec_episode = opec_episode,
+    lag1_opec_episode = dplyr::lag(opec_episode, 1),
+    lag2_opec_episode = dplyr::lag(opec_episode, 2),
+    lag3_opec_episode = dplyr::lag(opec_episode, 3),
+    lag4_opec_episode = dplyr::lag(opec_episode, 4),
+    # Crisis lags — post dummies
+    lag0_covid        = covid,
+    lag1_covid        = dplyr::lag(covid,        1),
+    lag2_covid        = dplyr::lag(covid,        2),
+    lag3_covid        = dplyr::lag(covid,        3),
+    lag4_covid        = dplyr::lag(covid,        4)
+  ) %>%
+  ungroup()
+
+cat("Pre-computation done.\n")
+
+########################################################################
+# FIRST STAGE — run separately for pre and post on time series
+# Macro controls only (ip_growth, inflation lags)
+# Crisis dummies NOT included in first stage — d_gs1 is a macro
+# variable and crisis dummies are commodity-second-stage controls
+########################################################################
+
+cat("=== Running first stages ===\n")
+
+macro_controls <- c(
+  paste0("lag", 1:lags, "_ip_growth"),
+  paste0("lag", 1:lags, "_inflation")
+)
+
+fs_formula <- paste(
+  "d_gs1 ~ shock +",
+  paste(macro_controls, collapse = " + ")
+)
+
+run_first_stage <- function(data, start, end, label) {
+  
+  d_ts <- data %>%
+    filter(date >= start, date <= end) %>%
+    arrange(date) %>%
+    group_by(date) %>%
+    slice(1) %>%
+    ungroup() %>%
+    filter(!is.na(d_gs1), !is.na(shock)) %>%
+    drop_na(any_of(macro_controls))
+  
+  if (nrow(d_ts) < 10) stop(paste("Too few obs for first stage:", label))
+  
+  fit <- lm(as.formula(fs_formula), data = d_ts)
+  
+  cat("\n--- First Stage:", label, "---\n")
+  cat("N:", nrow(d_ts), "\n")
+  cat("F-statistic:", round(summary(fit)$fstatistic[1], 2), "\n")
+  cat("R-squared:  ", round(summary(fit)$r.squared, 4), "\n")
+  cat("shock coef: ", round(coef(fit)["shock"], 4),
+      "| t-stat:", round(summary(fit)$coefficients["shock","t value"], 2), "\n")
+  
+  d_ts$d_gs1_hat <- fitted(fit)
+  return(d_ts %>% select(date, d_gs1_hat))
+}
+
+fs_pre  <- run_first_stage(df, pre_start,  pre_end,
+                           "Oil Pre  (1994-2003)")
+fs_post <- run_first_stage(df, post_start, post_end,
+                           "Oil Post (2010-2021)")
+
+# Merge fitted values into panel
+df <- df %>%
+  left_join(fs_pre  %>% rename(d_gs1_hat_pre  = d_gs1_hat), by = "date") %>%
+  left_join(fs_post %>% rename(d_gs1_hat_post = d_gs1_hat), by = "date")
+
+cat("\nFirst stage fitted values merged.\n")
+cat("Non-NA d_gs1_hat_pre: ",  sum(!is.na(df$d_gs1_hat_pre)),  "\n")
+cat("Non-NA d_gs1_hat_post:", sum(!is.na(df$d_gs1_hat_post)), "\n")
+
+########################################################################
+# SECOND STAGE HELPER — Oil only, subsample-specific crisis dummies
+########################################################################
+
+run_second_stage_oil <- function(data, h, lags,
+                                 sub_start, sub_end,
+                                 fitted_col, crisis_v) {
+  
+  # Filter to Oil and subsample
+  d <- data %>%
+    filter(
+      commodity == "Oil",
+      date >= sub_start,
+      date <= sub_end
+    ) %>%
+    arrange(date)
+  
+  dep_var <- paste0("dep_h", h)
+  if (!dep_var %in% names(d)) return(NULL)
+  if (nrow(d) < 10)           return(NULL)
+  if (!fitted_col %in% names(d)) return(NULL)
+  if (all(is.na(d[[fitted_col]]))) return(NULL)
+  
+  d$d_gs1_hat <- d[[fitted_col]]
+  
+  # Full second-stage controls
+  # Oil has no currency control
+  full_controls <- c(
+    paste0("lag", 1:lags, "_dlp"),
+    paste0("lag", 1:lags, "_ip_growth"),
+    paste0("lag", 1:lags, "_inflation")
+  )
+  
+  # Add subsample-specific crisis dummies
+  for (cv in crisis_v) {
+    full_controls <- c(full_controls, paste0("lag", 0:lags, "_", cv))
+  }
+  
+  # Check columns exist
+  vars_needed  <- c(dep_var, "d_gs1_hat", full_controls)
+  missing_cols <- setdiff(vars_needed, names(d))
+  if (length(missing_cols) > 0) {
+    cat("Missing cols at h=", h, ":", paste(missing_cols, collapse=", "), "\n")
+    return(NULL)
+  }
+  
+  d <- d %>% drop_na(any_of(vars_needed))
+  if (nrow(d) < 10) return(NULL)
+  
+  ss_formula <- paste(
+    dep_var, "~",
+    paste(c("d_gs1_hat", full_controls), collapse = " + ")
+  )
+  
+  tryCatch({
+    fit <- lm(as.formula(ss_formula), data = d)
+    bw  <- max(1, h)
+    nw  <- NeweyWest(fit, lag = bw, prewhite = FALSE)
+    ct  <- coeftest(fit, vcov = nw)
+    
+    return(list(
+      beta = ct["d_gs1_hat", "Estimate"],
+      n    = nrow(d)
+    ))
+  }, error = function(e) NULL)
+}
+
+########################################################################
+# STEP 1: POINT ESTIMATES
+########################################################################
+
+cat("\n=== Computing Oil point estimates ===\n")
+
+point_estimates <- list()
+
+for (h in 0:horizon) {
+  
+  res_pre <- run_second_stage_oil(
+    data       = df,
+    h          = h,
+    lags       = lags,
+    sub_start  = pre_start,
+    sub_end    = pre_end,
+    fitted_col = "d_gs1_hat_pre",
+    crisis_v   = crisis_pre     # OPEC + GFC dummies
+  )
+  
+  res_post <- run_second_stage_oil(
+    data       = df,
+    h          = h,
+    lags       = lags,
+    sub_start  = post_start,
+    sub_end    = post_end,
+    fitted_col = "d_gs1_hat_post",
+    crisis_v   = crisis_post    # GFC + COVID dummies only
+  )
+  
+  if (!is.null(res_pre) & !is.null(res_post)) {
+    point_estimates[[as.character(h)]] <- data.frame(
+      commodity = "Oil",
+      horizon   = h,
+      beta_pre  = res_pre$beta,
+      beta_post = res_post$beta,
+      beta_diff = res_post$beta - res_pre$beta,
+      n_pre     = res_pre$n,
+      n_post    = res_post$n
+    )
+  }
+}
+
+point_df <- bind_rows(point_estimates)
+cat("Point estimates computed:", nrow(point_df), "rows\n")
+print(point_df %>% select(horizon, beta_pre, beta_post, beta_diff,
+                          n_pre, n_post))
+
+########################################################################
+# STEP 2: TIME-CLUSTER BOOTSTRAP ON SECOND STAGE
+# Dates resampled separately for pre and post
+# First stage fitted values fixed — not resampled
+########################################################################
+
+cat("\n=== Running bootstrap (B =", breps, ") ===\n")
+
+dates_pre  <- df %>%
+  filter(date >= pre_start,  date <= pre_end)  %>%
+  pull(date) %>% unique() %>% sort()
+
+dates_post <- df %>%
+  filter(date >= post_start, date <= post_end) %>%
+  pull(date) %>% unique() %>% sort()
+
+nT_pre  <- length(dates_pre)
+nT_post <- length(dates_post)
+
+cat("Pre-period unique dates:", nT_pre, "\n")
+cat("Post-period unique dates:", nT_post, "\n")
+
+boot_results <- list()
+
+for (b in 1:breps) {
+  
+  if (b %% 50 == 0) cat("  Replication", b, "of", breps, "\n")
+  
+  boot_dates_pre  <- sample(dates_pre,  nT_pre,  replace = TRUE)
+  boot_dates_post <- sample(dates_post, nT_post, replace = TRUE)
+  
+  # Build bootstrap datasets — keep original dates
+  boot_df_pre <- map_dfr(seq_along(boot_dates_pre), function(i) {
+    df %>%
+      filter(date == boot_dates_pre[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  boot_df_post <- map_dfr(seq_along(boot_dates_post), function(i) {
+    df %>%
+      filter(date == boot_dates_post[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  for (h in 0:horizon) {
+    
+    res_pre <- run_second_stage_oil(
+      data       = boot_df_pre,
+      h          = h,
+      lags       = lags,
+      sub_start  = pre_start,
+      sub_end    = pre_end,
+      fitted_col = "d_gs1_hat_pre",
+      crisis_v   = crisis_pre
+    )
+    
+    res_post <- run_second_stage_oil(
+      data       = boot_df_post,
+      h          = h,
+      lags       = lags,
+      sub_start  = post_start,
+      sub_end    = post_end,
+      fitted_col = "d_gs1_hat_post",
+      crisis_v   = crisis_post
+    )
+    
+    if (!is.null(res_pre) & !is.null(res_post)) {
+      boot_results[[length(boot_results) + 1]] <- data.frame(
+        horizon     = h,
+        rep         = b,
+        beta_pre_b  = res_pre$beta,
+        beta_post_b = res_post$beta,
+        beta_diff_b = res_post$beta - res_pre$beta
+      )
+    }
+  }
+}
+
+boot_df_results <- bind_rows(boot_results)
+cat("Bootstrap results:", nrow(boot_df_results), "rows\n")
+
+if (nrow(boot_df_results) == 0) stop("Bootstrap produced no results")
+
+########################################################################
+# STEP 3: BOOTSTRAP CONFIDENCE BANDS
+########################################################################
+
+cat("=== Computing confidence bands ===\n")
+
+boot_bands <- boot_df_results %>%
+  group_by(horizon) %>%
+  summarise(
+    nvalid       = n(),
+    lower_diff90 = quantile(beta_diff_b, 0.05,  na.rm = TRUE),
+    lower_diff68 = quantile(beta_diff_b, 0.16,  na.rm = TRUE),
+    upper_diff68 = quantile(beta_diff_b, 0.84,  na.rm = TRUE),
+    upper_diff90 = quantile(beta_diff_b, 0.95,  na.rm = TRUE),
+    lower_pre90  = quantile(beta_pre_b,  0.05,  na.rm = TRUE),
+    lower_pre68  = quantile(beta_pre_b,  0.16,  na.rm = TRUE),
+    upper_pre68  = quantile(beta_pre_b,  0.84,  na.rm = TRUE),
+    upper_pre90  = quantile(beta_pre_b,  0.95,  na.rm = TRUE),
+    lower_post90 = quantile(beta_post_b, 0.05,  na.rm = TRUE),
+    lower_post68 = quantile(beta_post_b, 0.16,  na.rm = TRUE),
+    upper_post68 = quantile(beta_post_b, 0.84,  na.rm = TRUE),
+    upper_post90 = quantile(beta_post_b, 0.95,  na.rm = TRUE),
+    .groups = "drop"
+  )
+
+########################################################################
+# STEP 4: MERGE AND SAVE
+########################################################################
+
+final_df <- point_df %>%
+  left_join(boot_bands, by = "horizon")
+
+write.csv(final_df,
+          paste0(input, "\\oil_lpiv_robustness.csv"),
+          row.names = FALSE)
+cat("=== Saved oil_lpiv_robustness.csv ===\n")
+
+########################################################################
+# STEP 5: PLOT
+########################################################################
+
+cat("=== Plotting ===\n")
+
+caption_base <- paste0(
+  "LP-IV: d_gs1 instrumented by Acosta et al. shock\n",
+  "Pre (1994-2003): OPEC episode dummy included\n",
+  "Post (2010-2021): GFC + COVID dummies | No Ukraine/2022 tightening\n",
+  "First stage per subsample (macro controls) | NW SE\n",
+  "Time-cluster bootstrap on second stage, B=", breps,
+  " | Bands = 16th-84th (68%) and 5th-95th (90%) percentiles"
+)
+
+plot_theme <- theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major = element_line(color = "grey85",
+                                    linetype = "dashed"),
+    panel.grid.minor = element_blank(),
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.caption     = element_text(size = 8, hjust = 1),
+    legend.position  = "bottom",
+    axis.title       = element_text(size = 11)
+  )
+
+d <- final_df
+
+# Pre-financialization IRF
+p_pre <- ggplot(d, aes(x = horizon)) +
+  geom_ribbon(aes(ymin = lower_pre90, ymax = upper_pre90),
+              fill = "blue", alpha = 0.15) +
+  geom_ribbon(aes(ymin = lower_pre68, ymax = upper_pre68),
+              fill = "blue", alpha = 0.30) +
+  geom_line(aes(y = beta_pre),
+            color = "blue", linewidth = 0.8) +
+  geom_hline(yintercept = 0, color = "black") +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(
+    title   = "Oil: LP-IV IRF Pre-Financialization (1994-2003)",
+    x       = "Months after shock",
+    y       = "Cumulative log price change",
+    caption = caption_base
+  ) +
+  plot_theme
+
+ggsave(paste0(output, "irf_Oil_robust_lpiv_pre_boot.png"),
+       p_pre, width = 10, height = 6, dpi = 200)
+
+# Post-financialization IRF
+p_post <- ggplot(d, aes(x = horizon)) +
+  geom_ribbon(aes(ymin = lower_post90, ymax = upper_post90),
+              fill = "red", alpha = 0.15) +
+  geom_ribbon(aes(ymin = lower_post68, ymax = upper_post68),
+              fill = "red", alpha = 0.30) +
+  geom_line(aes(y = beta_post),
+            color = "red", linewidth = 0.8) +
+  geom_hline(yintercept = 0, color = "black") +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(
+    title   = "Oil: LP-IV IRF Post-Financialization (2010-2021)",
+    x       = "Months after shock",
+    y       = "Cumulative log price change",
+    caption = caption_base
+  ) +
+  plot_theme
+
+ggsave(paste0(output, "irf_Oil_robust_lpiv_post_boot.png"),
+       p_post, width = 10, height = 6, dpi = 200)
+
+# Difference IRF
+p_diff <- ggplot(d, aes(x = horizon)) +
+  geom_ribbon(aes(ymin = lower_diff90, ymax = upper_diff90),
+              fill = "darkgreen", alpha = 0.15) +
+  geom_ribbon(aes(ymin = lower_diff68, ymax = upper_diff68),
+              fill = "darkgreen", alpha = 0.30) +
+  geom_line(aes(y = beta_diff),
+            color = "darkgreen", linewidth = 0.8) +
+  geom_hline(yintercept = 0, color = "black") +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(
+    title   = "Oil: LP-IV Difference in IRF (Post minus Pre)",
+    x       = "Months after shock",
+    y       = "Difference in cumulative log price change",
+    caption = paste0(
+      "Negative = stronger negative response post-financialization\n",
+      caption_base
+    )
+  ) +
+  plot_theme
+
+ggsave(paste0(output, "irf_Oil_robust_lpiv_diff_boot.png"),
+       p_diff, width = 10, height = 6, dpi = 200)
+
+cat("=== Saved Oil robustness plots ===\n")
+cat("=== Done ===\n")
+
+########################################################################
+# LP-IV SUBSAMPLE COMPARISON - Time-cluster Bootstrap
+# Pre-financialization (1994-2007) vs Post-financialization (2010-2025)
+# [UPDATED: pre_end extended from 2003-12-01 to 2007-12-01]
+#
+# ARCHITECTURE:
+# - First stage: run SEPARATELY for each subsample on time series
+#   d_gs1 ~ shock + macro_controls (ip_growth, inflation lags only)
+#   Macro controls only because d_gs1 is not commodity-specific
+#
+# - Second stage: run SEPARATELY for each subsample
+#   dep_h ~ d_gs1_hat + full_controls
+#   Full controls include commodity-specific lags applied here only
+#
+# - Bootstrap: time-cluster bootstrap on SECOND STAGE only
+#   First stage fitted values fixed within each bootstrap replication
+#   Dates resampled separately for pre and post subsamples
+########################################################################
+
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+library(purrr)
+library(lubridate)
+
+input  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\DTA"
+output <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\04 Output - figures and tables\\04 bootstrapping\\"
+
+if (!dir.exists(output)) dir.create(output, recursive = TRUE)
+
+########################################################################
+# LOAD DATA
+########################################################################
+
+df <- read_dta(paste0(input, "\\master_panel_gs1.dta"))
+
+df <- df %>%
+  mutate(
+    date    = as.Date("1960-01-01") %m+% months(as.integer(date)),
+    date_ym = format(date, "%Y-%m")
+  )
+
+if (!"d_gs1" %in% names(df)) stop("d_gs1 not found")
+cat("d_gs1 found. Non-NA obs:", sum(!is.na(df$d_gs1)), "\n")
+cat("Unique commodities:", paste(unique(df$commodity), collapse = ", "), "\n")
+cat("Date range:", format(min(df$date)), "to", format(max(df$date)), "\n")
+
+df <- df %>%
+  mutate(
+    gfc     = as.integer(date >= as.Date("2008-09-01") &
+                           date <= as.Date("2009-06-01")),
+    covid   = as.integer(date >= as.Date("2020-03-01") &
+                           date <= as.Date("2021-06-01")),
+    ukraine = as.integer(date >= as.Date("2022-02-01") &
+                           date <= as.Date("2022-12-01"))
+  )
+
+########################################################################
+# PARAMETERS
+########################################################################
+
+lags        <- 4
+horizon     <- 24
+breps       <- 500
+commodities <- c("Coffee", "Copper", "Gold", "Oil", "Soybeans", "Wheat")
+
+curr_controls <- list(
+  Coffee   = "d_brl",
+  Copper   = "d_clp",
+  Gold     = "d_aud",
+  Oil      = NULL,
+  Soybeans = "d_brl",
+  Wheat    = NULL
+)
+
+crisis_vars <- list(
+  Coffee   = c("gfc", "covid"),
+  Copper   = c("gfc", "covid"),
+  Gold     = c("gfc", "covid"),
+  Oil      = c("gfc", "covid", "ukraine"),
+  Soybeans = c("gfc", "covid", "ukraine"),
+  Wheat    = c("gfc", "covid", "ukraine")
+)
+
+# ---- UPDATED SAMPLE BOUNDARIES ----
+# Pre-period extended by 4 years: 2003-12-01 -> 2007-12-01
+# 2008-2009 dropped as crisis transition years
+# Post-period unchanged
+pre_start  <- as.Date("1994-01-01")
+pre_end    <- as.Date("2007-12-01")   # <-- UPDATED (was 2003-12-01)
+post_start <- as.Date("2010-01-01")
+post_end   <- as.Date("2025-12-01")
+
+########################################################################
+# PRE-COMPUTE ALL LAGS ON FULL DATA
+########################################################################
+
+cat("=== Pre-computing lags ===\n")
+
+df <- df %>%
+  arrange(commodity, date) %>%
+  group_by(commodity) %>%
+  mutate(
+    lag1_dlp       = dplyr::lag(d_log_price, 1),
+    lag2_dlp       = dplyr::lag(d_log_price, 2),
+    lag3_dlp       = dplyr::lag(d_log_price, 3),
+    lag4_dlp       = dplyr::lag(d_log_price, 4),
+    lag1_ip_growth = dplyr::lag(ip_growth,   1),
+    lag2_ip_growth = dplyr::lag(ip_growth,   2),
+    lag3_ip_growth = dplyr::lag(ip_growth,   3),
+    lag4_ip_growth = dplyr::lag(ip_growth,   4),
+    lag1_inflation = dplyr::lag(inflation,   1),
+    lag2_inflation = dplyr::lag(inflation,   2),
+    lag3_inflation = dplyr::lag(inflation,   3),
+    lag4_inflation = dplyr::lag(inflation,   4),
+    lag1_d_brl     = dplyr::lag(d_brl,       1),
+    lag2_d_brl     = dplyr::lag(d_brl,       2),
+    lag3_d_brl     = dplyr::lag(d_brl,       3),
+    lag4_d_brl     = dplyr::lag(d_brl,       4),
+    lag1_d_clp     = dplyr::lag(d_clp,       1),
+    lag2_d_clp     = dplyr::lag(d_clp,       2),
+    lag3_d_clp     = dplyr::lag(d_clp,       3),
+    lag4_d_clp     = dplyr::lag(d_clp,       4),
+    lag1_d_aud     = dplyr::lag(d_aud,       1),
+    lag2_d_aud     = dplyr::lag(d_aud,       2),
+    lag3_d_aud     = dplyr::lag(d_aud,       3),
+    lag4_d_aud     = dplyr::lag(d_aud,       4),
+    lag0_gfc       = gfc,
+    lag1_gfc       = dplyr::lag(gfc,         1),
+    lag2_gfc       = dplyr::lag(gfc,         2),
+    lag3_gfc       = dplyr::lag(gfc,         3),
+    lag4_gfc       = dplyr::lag(gfc,         4),
+    lag0_covid     = covid,
+    lag1_covid     = dplyr::lag(covid,       1),
+    lag2_covid     = dplyr::lag(covid,       2),
+    lag3_covid     = dplyr::lag(covid,       3),
+    lag4_covid     = dplyr::lag(covid,       4),
+    lag0_ukraine   = ukraine,
+    lag1_ukraine   = dplyr::lag(ukraine,     1),
+    lag2_ukraine   = dplyr::lag(ukraine,     2),
+    lag3_ukraine   = dplyr::lag(ukraine,     3),
+    lag4_ukraine   = dplyr::lag(ukraine,     4)
+  ) %>%
+  ungroup()
+
+cat("Pre-computation done. Columns:", ncol(df), "\n")
+
+########################################################################
+# FIRST STAGE — run separately for each subsample on time series
+########################################################################
+
+cat("=== Running first stages ===\n")
+
+macro_controls <- c(
+  paste0("lag", 1:lags, "_ip_growth"),
+  paste0("lag", 1:lags, "_inflation")
+)
+
+fs_formula <- paste(
+  "d_gs1 ~ shock +",
+  paste(macro_controls, collapse = " + ")
+)
+
+run_first_stage <- function(data, start, end, label) {
+  
+  d_ts <- data %>%
+    filter(date >= start, date <= end) %>%
+    arrange(date) %>%
+    group_by(date) %>%
+    slice(1) %>%
+    ungroup() %>%
+    filter(!is.na(d_gs1), !is.na(shock)) %>%
+    drop_na(any_of(macro_controls))
+  
+  if (nrow(d_ts) < 10) stop(paste("Too few time-series obs for", label))
+  
+  fit <- lm(as.formula(fs_formula), data = d_ts)
+  
+  cat("\n--- First Stage:", label, "---\n")
+  cat("N:", nrow(d_ts), "\n")
+  cat("F-statistic:", round(summary(fit)$fstatistic[1], 2), "\n")
+  cat("R-squared:", round(summary(fit)$r.squared, 4), "\n")
+  cat("shock coef:", round(coef(fit)["shock"], 4),
+      "| t-stat:", round(summary(fit)$coefficients["shock", "t value"], 2), "\n")
+  
+  d_ts$d_gs1_hat <- fitted(fit)
+  return(d_ts %>% select(date, d_gs1_hat))
+}
+
+fs_pre  <- run_first_stage(df, pre_start,  pre_end,  "Pre  (1994-2007)")
+fs_post <- run_first_stage(df, post_start, post_end, "Post (2010-2025)")
+
+df <- df %>%
+  left_join(fs_pre  %>% rename(d_gs1_hat_pre  = d_gs1_hat), by = "date") %>%
+  left_join(fs_post %>% rename(d_gs1_hat_post = d_gs1_hat), by = "date")
+
+cat("\nFirst stage fitted values merged into panel.\n")
+cat("Non-NA d_gs1_hat_pre: ",  sum(!is.na(df$d_gs1_hat_pre)),  "\n")
+cat("Non-NA d_gs1_hat_post:", sum(!is.na(df$d_gs1_hat_post)), "\n")
+
+########################################################################
+# SECOND STAGE HELPER FUNCTION
+########################################################################
+
+run_second_stage <- function(data, commodity_name, h, lags,
+                             curr_control, crisis_v,
+                             sub_start, sub_end,
+                             fitted_col) {
+  
+  d <- data %>%
+    filter(
+      commodity == commodity_name,
+      date >= sub_start,
+      date <= sub_end
+    ) %>%
+    arrange(date)
+  
+  dep_var <- paste0("dep_h", h)
+  if (!dep_var %in% names(d)) return(NULL)
+  if (nrow(d) < 10)           return(NULL)
+  if (!fitted_col %in% names(d))        return(NULL)
+  if (all(is.na(d[[fitted_col]])))      return(NULL)
+  
+  d$d_gs1_hat <- d[[fitted_col]]
+  
+  full_controls <- c(
+    paste0("lag", 1:lags, "_dlp"),
+    paste0("lag", 1:lags, "_ip_growth"),
+    paste0("lag", 1:lags, "_inflation")
+  )
+  if (!is.null(curr_control)) {
+    full_controls <- c(full_controls,
+                       paste0("lag", 1:lags, "_", curr_control))
+  }
+  for (cv in crisis_v) {
+    full_controls <- c(full_controls, paste0("lag", 0:lags, "_", cv))
+  }
+  
+  missing_cols <- setdiff(
+    c(dep_var, "d_gs1_hat", full_controls),
+    names(d)
+  )
+  if (length(missing_cols) > 0) return(NULL)
+  
+  d <- d %>% drop_na(any_of(c(dep_var, "d_gs1_hat", full_controls)))
+  if (nrow(d) < 10) return(NULL)
+  
+  ss_formula <- paste(
+    dep_var, "~",
+    paste(c("d_gs1_hat", full_controls), collapse = " + ")
+  )
+  
+  tryCatch({
+    fit <- lm(as.formula(ss_formula), data = d)
+    bw  <- max(1, h)
+    nw  <- NeweyWest(fit, lag = bw, prewhite = FALSE)
+    ct  <- coeftest(fit, vcov = nw)
+    
+    return(list(
+      beta = ct["d_gs1_hat", "Estimate"],
+      n    = nrow(d)
+    ))
+  }, error = function(e) NULL)
+}
+
+########################################################################
+# STEP 1: POINT ESTIMATES
+########################################################################
+
+cat("\n=== Computing point estimates ===\n")
+
+point_estimates <- list()
+
+for (c in commodities) {
+  cat("  Commodity:", c, "\n")
+  for (h in 0:horizon) {
+    
+    res_pre <- run_second_stage(
+      data           = df,
+      commodity_name = c,
+      h              = h,
+      lags           = lags,
+      curr_control   = curr_controls[[c]],
+      crisis_v       = crisis_vars[[c]],
+      sub_start      = pre_start,
+      sub_end        = pre_end,
+      fitted_col     = "d_gs1_hat_pre"
+    )
+    
+    res_post <- run_second_stage(
+      data           = df,
+      commodity_name = c,
+      h              = h,
+      lags           = lags,
+      curr_control   = curr_controls[[c]],
+      crisis_v       = crisis_vars[[c]],
+      sub_start      = post_start,
+      sub_end        = post_end,
+      fitted_col     = "d_gs1_hat_post"
+    )
+    
+    if (!is.null(res_pre) & !is.null(res_post)) {
+      point_estimates[[paste(c, h, sep = "_")]] <- data.frame(
+        commodity = c,
+        horizon   = h,
+        beta_pre  = res_pre$beta,
+        beta_post = res_post$beta,
+        beta_diff = res_post$beta - res_pre$beta,
+        n_pre     = res_pre$n,
+        n_post    = res_post$n
+      )
+    }
+  }
+}
+
+point_df <- bind_rows(point_estimates)
+cat("Point estimates computed:", nrow(point_df), "rows\n")
+print(head(point_df))
+
+########################################################################
+# STEP 2: TIME-CLUSTER BOOTSTRAP ON SECOND STAGE ONLY
+########################################################################
+
+cat("\n=== Running bootstrap (B =", breps, ") ===\n")
+
+dates_pre  <- df %>%
+  filter(date >= pre_start,  date <= pre_end)  %>%
+  pull(date) %>% unique() %>% sort()
+
+dates_post <- df %>%
+  filter(date >= post_start, date <= post_end) %>%
+  pull(date) %>% unique() %>% sort()
+
+nT_pre  <- length(dates_pre)
+nT_post <- length(dates_post)
+
+cat("Pre-period unique dates:", nT_pre, "\n")
+cat("Post-period unique dates:", nT_post, "\n")
+
+boot_results <- list()
+
+for (b in 1:breps) {
+  
+  if (b %% 50 == 0) cat("  Replication", b, "of", breps, "\n")
+  
+  boot_dates_pre  <- sample(dates_pre,  nT_pre,  replace = TRUE)
+  boot_dates_post <- sample(dates_post, nT_post, replace = TRUE)
+  
+  boot_df_pre <- map_dfr(seq_along(boot_dates_pre), function(i) {
+    df %>%
+      filter(date == boot_dates_pre[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  boot_df_post <- map_dfr(seq_along(boot_dates_post), function(i) {
+    df %>%
+      filter(date == boot_dates_post[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  for (c in commodities) {
+    for (h in 0:horizon) {
+      
+      res_pre <- run_second_stage(
+        data           = boot_df_pre,
+        commodity_name = c,
+        h              = h,
+        lags           = lags,
+        curr_control   = curr_controls[[c]],
+        crisis_v       = crisis_vars[[c]],
+        sub_start      = pre_start,
+        sub_end        = pre_end,
+        fitted_col     = "d_gs1_hat_pre"
+      )
+      
+      res_post <- run_second_stage(
+        data           = boot_df_post,
+        commodity_name = c,
+        h              = h,
+        lags           = lags,
+        curr_control   = curr_controls[[c]],
+        crisis_v       = crisis_vars[[c]],
+        sub_start      = post_start,
+        sub_end        = post_end,
+        fitted_col     = "d_gs1_hat_post"
+      )
+      
+      if (!is.null(res_pre) & !is.null(res_post)) {
+        boot_results[[length(boot_results) + 1]] <- data.frame(
+          commodity   = c,
+          horizon     = h,
+          rep         = b,
+          beta_pre_b  = res_pre$beta,
+          beta_post_b = res_post$beta,
+          beta_diff_b = res_post$beta - res_pre$beta
+        )
+      }
+    }
+  }
+}
+
+boot_df_results <- bind_rows(boot_results)
+cat("Bootstrap results:", nrow(boot_df_results), "rows\n")
+
+if (nrow(boot_df_results) == 0) {
+  stop("Bootstrap produced no results — check run_second_stage diagnostics")
+}
+
+########################################################################
+# STEP 3: BOOTSTRAP CONFIDENCE BANDS
+########################################################################
+
+cat("=== Computing confidence bands ===\n")
+
+boot_bands <- boot_df_results %>%
+  group_by(commodity, horizon) %>%
+  summarise(
+    nvalid       = n(),
+    lower_diff90 = quantile(beta_diff_b, 0.05,  na.rm = TRUE),
+    lower_diff68 = quantile(beta_diff_b, 0.16,  na.rm = TRUE),
+    upper_diff68 = quantile(beta_diff_b, 0.84,  na.rm = TRUE),
+    upper_diff90 = quantile(beta_diff_b, 0.95,  na.rm = TRUE),
+    lower_pre90  = quantile(beta_pre_b,  0.05,  na.rm = TRUE),
+    lower_pre68  = quantile(beta_pre_b,  0.16,  na.rm = TRUE),
+    upper_pre68  = quantile(beta_pre_b,  0.84,  na.rm = TRUE),
+    upper_pre90  = quantile(beta_pre_b,  0.95,  na.rm = TRUE),
+    lower_post90 = quantile(beta_post_b, 0.05,  na.rm = TRUE),
+    lower_post68 = quantile(beta_post_b, 0.16,  na.rm = TRUE),
+    upper_post68 = quantile(beta_post_b, 0.84,  na.rm = TRUE),
+    upper_post90 = quantile(beta_post_b, 0.95,  na.rm = TRUE),
+    .groups = "drop"
+  )
+
+########################################################################
+# STEP 4: MERGE AND SAVE
+########################################################################
+
+final_df <- point_df %>%
+  left_join(boot_bands, by = c("commodity", "horizon"))
+
+# Saved under new name to avoid overwriting original results
+write.csv(final_df,
+          paste0(input, "\\lp_iv_subsample_bootstrap_pre2007.csv"),
+          row.names = FALSE)
+cat("=== Saved lp_iv_subsample_bootstrap_pre2007.csv ===\n")
+
+########################################################################
+# STEP 5: PLOT
+########################################################################
+
+cat("=== Plotting ===\n")
+
+caption_base <- paste0(
+  "LP-IV: d_gs1 instrumented by Acosta et al. shock\n",
+  "First stage run separately per subsample on time series ",
+  "(macro controls only)\n",
+  "Second stage: full commodity controls | Newey-West SE\n",
+  "Time-cluster bootstrap on second stage, B=", breps,
+  " | Bands = 16th-84th (68%) and 5th-95th (90%) percentiles"
+)
+
+plot_theme <- theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major = element_line(color = "grey85",
+                                    linetype = "dashed"),
+    panel.grid.minor = element_blank(),
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.caption     = element_text(size = 8, hjust = 1),
+    legend.position  = "bottom",
+    axis.title       = element_text(size = 11)
+  )
+
+for (c in commodities) {
+  
+  d <- final_df %>% filter(commodity == c)
+  
+  # Pre-financialization IRF
+  p_pre <- ggplot(d, aes(x = horizon)) +
+    geom_ribbon(aes(ymin = lower_pre90, ymax = upper_pre90),
+                fill = "blue", alpha = 0.15) +
+    geom_ribbon(aes(ymin = lower_pre68, ymax = upper_pre68),
+                fill = "blue", alpha = 0.30) +
+    geom_line(aes(y = beta_pre),
+              color = "blue", linewidth = 0.8) +
+    geom_hline(yintercept = 0, color = "black") +
+    scale_x_continuous(breaks = seq(0, 24, 4)) +
+    labs(
+      title   = paste0(c, ": LP-IV IRF Pre-Financialization (1994-2007)"),
+      x       = "Months after shock",
+      y       = "Cumulative log price change",
+      caption = caption_base
+    ) +
+    plot_theme
+  
+  ggsave(paste0(output, "irf_", c, "_lpiv_pre2007_boot.png"),
+         p_pre, width = 10, height = 6, dpi = 200)
+  
+  # Post-financialization IRF
+  p_post <- ggplot(d, aes(x = horizon)) +
+    geom_ribbon(aes(ymin = lower_post90, ymax = upper_post90),
+                fill = "red", alpha = 0.15) +
+    geom_ribbon(aes(ymin = lower_post68, ymax = upper_post68),
+                fill = "red", alpha = 0.30) +
+    geom_line(aes(y = beta_post),
+              color = "red", linewidth = 0.8) +
+    geom_hline(yintercept = 0, color = "black") +
+    scale_x_continuous(breaks = seq(0, 24, 4)) +
+    labs(
+      title   = paste0(c, ": LP-IV IRF Post-Financialization (2010-2025)"),
+      x       = "Months after shock",
+      y       = "Cumulative log price change",
+      caption = caption_base
+    ) +
+    plot_theme
+  
+  ggsave(paste0(output, "irf_", c, "_lpiv_post2007_boot.png"),
+         p_post, width = 10, height = 6, dpi = 200)
+  
+  # Difference IRF
+  p_diff <- ggplot(d, aes(x = horizon)) +
+    geom_ribbon(aes(ymin = lower_diff90, ymax = upper_diff90),
+                fill = "darkgreen", alpha = 0.15) +
+    geom_ribbon(aes(ymin = lower_diff68, ymax = upper_diff68),
+                fill = "darkgreen", alpha = 0.30) +
+    geom_line(aes(y = beta_diff),
+              color = "darkgreen", linewidth = 0.8) +
+    geom_hline(yintercept = 0, color = "black") +
+    scale_x_continuous(breaks = seq(0, 24, 4)) +
+    labs(
+      title   = paste0(c, ": LP-IV Difference in IRF (Post minus Pre)"),
+      x       = "Months after shock",
+      y       = "Difference in cumulative log price change",
+      caption = paste0(
+        "Negative = stronger negative response post-financialization\n",
+        caption_base
+      )
+    ) +
+    plot_theme
+  
+  ggsave(paste0(output, "irf_", c, "_lpiv_diff2007_boot.png"),
+         p_diff, width = 10, height = 6, dpi = 200)
+  
+  cat("  Saved:", c, "pre, post, diff\n")
+}
+
+cat("=== Done ===\n")
+
+########################################################################
+# LP-IV SUBSAMPLE COMPARISON - Time-cluster Bootstrap
+# Pre-financialization (1994-2007) vs Post-financialization (2010-2025)
+# [UPDATED: pre_end extended from 2003-12-01 to 2007-12-01]
+# 2008-2009 dropped as crisis transition years from both subsamples
+#
+# ARCHITECTURE:
+# - First stage: run SEPARATELY for each subsample on time series
+#   d_gs1 ~ shock + macro_controls (ip_growth, inflation lags only)
+#   Macro controls only because d_gs1 is not commodity-specific
+#
+# - Second stage: run SEPARATELY for each subsample
+#   dep_h ~ d_gs1_hat + full_controls
+#   Full controls include commodity-specific lags applied here only
+#
+# - Bootstrap: time-cluster bootstrap on SECOND STAGE only
+#   First stage fitted values fixed within each bootstrap replication
+#   Dates resampled separately for pre and post subsamples
+########################################################################
+
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+library(purrr)
+library(lubridate)
+
+input  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\DTA"
+output <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\04 Output - figures and tables\\04 bootstrapping\\"
+
+if (!dir.exists(output)) dir.create(output, recursive = TRUE)
+
+########################################################################
+# LOAD DATA
+########################################################################
+
+df <- read_dta(paste0(input, "\\master_panel_gs1.dta"))
+
+df <- df %>%
+  mutate(
+    date    = as.Date("1960-01-01") %m+% months(as.integer(date)),
+    date_ym = format(date, "%Y-%m")
+  )
+
+if (!"d_gs1" %in% names(df)) stop("d_gs1 not found")
+cat("d_gs1 found. Non-NA obs:", sum(!is.na(df$d_gs1)), "\n")
+cat("Unique commodities:", paste(unique(df$commodity), collapse = ", "), "\n")
+cat("Date range:", format(min(df$date)), "to", format(max(df$date)), "\n")
+
+df <- df %>%
+  mutate(
+    gfc     = as.integer(date >= as.Date("2008-09-01") &
+                           date <= as.Date("2009-06-01")),
+    covid   = as.integer(date >= as.Date("2020-03-01") &
+                           date <= as.Date("2021-06-01")),
+    ukraine = as.integer(date >= as.Date("2022-02-01") &
+                           date <= as.Date("2022-12-01"))
+  )
+
+########################################################################
+# PARAMETERS
+########################################################################
+
+lags        <- 4
+horizon     <- 24
+breps       <- 500
+commodities <- c("Coffee", "Copper", "Gold", "Oil", "Soybeans", "Wheat")
+
+curr_controls <- list(
+  Coffee   = "d_brl",
+  Copper   = "d_clp",
+  Gold     = "d_aud",
+  Oil      = NULL,
+  Soybeans = "d_brl",
+  Wheat    = NULL
+)
+
+crisis_vars <- list(
+  Coffee   = c("gfc", "covid"),
+  Copper   = c("gfc", "covid"),
+  Gold     = c("gfc", "covid"),
+  Oil      = c("gfc", "covid", "ukraine"),
+  Soybeans = c("gfc", "covid", "ukraine"),
+  Wheat    = c("gfc", "covid", "ukraine")
+)
+
+# ---- UPDATED SAMPLE BOUNDARIES ----
+# Pre-period extended by 4 years: 2003-12-01 -> 2007-12-01
+# 2008-2009 excluded as GFC/crisis transition years
+# Post-period unchanged
+pre_start  <- as.Date("1994-01-01")
+pre_end    <- as.Date("2007-12-01")   # <-- UPDATED (was 2003-12-01)
+post_start <- as.Date("2010-01-01")
+post_end   <- as.Date("2025-12-01")
+
+########################################################################
+# PRE-COMPUTE ALL LAGS ON FULL DATA
+########################################################################
+
+cat("=== Pre-computing lags ===\n")
+
+df <- df %>%
+  arrange(commodity, date) %>%
+  group_by(commodity) %>%
+  mutate(
+    lag1_dlp       = dplyr::lag(d_log_price, 1),
+    lag2_dlp       = dplyr::lag(d_log_price, 2),
+    lag3_dlp       = dplyr::lag(d_log_price, 3),
+    lag4_dlp       = dplyr::lag(d_log_price, 4),
+    lag1_ip_growth = dplyr::lag(ip_growth,   1),
+    lag2_ip_growth = dplyr::lag(ip_growth,   2),
+    lag3_ip_growth = dplyr::lag(ip_growth,   3),
+    lag4_ip_growth = dplyr::lag(ip_growth,   4),
+    lag1_inflation = dplyr::lag(inflation,   1),
+    lag2_inflation = dplyr::lag(inflation,   2),
+    lag3_inflation = dplyr::lag(inflation,   3),
+    lag4_inflation = dplyr::lag(inflation,   4),
+    lag1_d_brl     = dplyr::lag(d_brl,       1),
+    lag2_d_brl     = dplyr::lag(d_brl,       2),
+    lag3_d_brl     = dplyr::lag(d_brl,       3),
+    lag4_d_brl     = dplyr::lag(d_brl,       4),
+    lag1_d_clp     = dplyr::lag(d_clp,       1),
+    lag2_d_clp     = dplyr::lag(d_clp,       2),
+    lag3_d_clp     = dplyr::lag(d_clp,       3),
+    lag4_d_clp     = dplyr::lag(d_clp,       4),
+    lag1_d_aud     = dplyr::lag(d_aud,       1),
+    lag2_d_aud     = dplyr::lag(d_aud,       2),
+    lag3_d_aud     = dplyr::lag(d_aud,       3),
+    lag4_d_aud     = dplyr::lag(d_aud,       4),
+    lag0_gfc       = gfc,
+    lag1_gfc       = dplyr::lag(gfc,         1),
+    lag2_gfc       = dplyr::lag(gfc,         2),
+    lag3_gfc       = dplyr::lag(gfc,         3),
+    lag4_gfc       = dplyr::lag(gfc,         4),
+    lag0_covid     = covid,
+    lag1_covid     = dplyr::lag(covid,       1),
+    lag2_covid     = dplyr::lag(covid,       2),
+    lag3_covid     = dplyr::lag(covid,       3),
+    lag4_covid     = dplyr::lag(covid,       4),
+    lag0_ukraine   = ukraine,
+    lag1_ukraine   = dplyr::lag(ukraine,     1),
+    lag2_ukraine   = dplyr::lag(ukraine,     2),
+    lag3_ukraine   = dplyr::lag(ukraine,     3),
+    lag4_ukraine   = dplyr::lag(ukraine,     4)
+  ) %>%
+  ungroup()
+
+cat("Pre-computation done. Columns:", ncol(df), "\n")
+
+########################################################################
+# FIRST STAGE — run separately for each subsample on time series
+########################################################################
+
+cat("=== Running first stages ===\n")
+
+macro_controls <- c(
+  paste0("lag", 1:lags, "_ip_growth"),
+  paste0("lag", 1:lags, "_inflation")
+)
+
+fs_formula <- paste(
+  "d_gs1 ~ shock +",
+  paste(macro_controls, collapse = " + ")
+)
+
+run_first_stage <- function(data, start, end, label) {
+  
+  d_ts <- data %>%
+    filter(date >= start, date <= end) %>%
+    arrange(date) %>%
+    group_by(date) %>%
+    slice(1) %>%
+    ungroup() %>%
+    filter(!is.na(d_gs1), !is.na(shock)) %>%
+    drop_na(any_of(macro_controls))
+  
+  if (nrow(d_ts) < 10) stop(paste("Too few time-series obs for", label))
+  
+  fit <- lm(as.formula(fs_formula), data = d_ts)
+  
+  cat("\n--- First Stage:", label, "---\n")
+  cat("N:", nrow(d_ts), "\n")
+  cat("F-statistic:", round(summary(fit)$fstatistic[1], 2), "\n")
+  cat("R-squared:", round(summary(fit)$r.squared, 4), "\n")
+  cat("shock coef:", round(coef(fit)["shock"], 4),
+      "| t-stat:", round(summary(fit)$coefficients["shock", "t value"], 2), "\n")
+  
+  d_ts$d_gs1_hat <- fitted(fit)
+  return(d_ts %>% select(date, d_gs1_hat))
+}
+
+fs_pre  <- run_first_stage(df, pre_start,  pre_end,  "Pre  (1994-2007)")
+fs_post <- run_first_stage(df, post_start, post_end, "Post (2010-2025)")
+
+df <- df %>%
+  left_join(fs_pre  %>% rename(d_gs1_hat_pre  = d_gs1_hat), by = "date") %>%
+  left_join(fs_post %>% rename(d_gs1_hat_post = d_gs1_hat), by = "date")
+
+cat("\nFirst stage fitted values merged into panel.\n")
+cat("Non-NA d_gs1_hat_pre: ",  sum(!is.na(df$d_gs1_hat_pre)),  "\n")
+cat("Non-NA d_gs1_hat_post:", sum(!is.na(df$d_gs1_hat_post)), "\n")
+
+########################################################################
+# SECOND STAGE HELPER FUNCTION
+########################################################################
+
+run_second_stage <- function(data, commodity_name, h, lags,
+                             curr_control, crisis_v,
+                             sub_start, sub_end,
+                             fitted_col) {
+  
+  d <- data %>%
+    filter(
+      commodity == commodity_name,
+      date >= sub_start,
+      date <= sub_end
+    ) %>%
+    arrange(date)
+  
+  dep_var <- paste0("dep_h", h)
+  if (!dep_var %in% names(d)) return(NULL)
+  if (nrow(d) < 10)           return(NULL)
+  if (!fitted_col %in% names(d))        return(NULL)
+  if (all(is.na(d[[fitted_col]])))      return(NULL)
+  
+  d$d_gs1_hat <- d[[fitted_col]]
+  
+  full_controls <- c(
+    paste0("lag", 1:lags, "_dlp"),
+    paste0("lag", 1:lags, "_ip_growth"),
+    paste0("lag", 1:lags, "_inflation")
+  )
+  if (!is.null(curr_control)) {
+    full_controls <- c(full_controls,
+                       paste0("lag", 1:lags, "_", curr_control))
+  }
+  for (cv in crisis_v) {
+    full_controls <- c(full_controls, paste0("lag", 0:lags, "_", cv))
+  }
+  
+  missing_cols <- setdiff(
+    c(dep_var, "d_gs1_hat", full_controls),
+    names(d)
+  )
+  if (length(missing_cols) > 0) return(NULL)
+  
+  d <- d %>% drop_na(any_of(c(dep_var, "d_gs1_hat", full_controls)))
+  if (nrow(d) < 10) return(NULL)
+  
+  ss_formula <- paste(
+    dep_var, "~",
+    paste(c("d_gs1_hat", full_controls), collapse = " + ")
+  )
+  
+  tryCatch({
+    fit <- lm(as.formula(ss_formula), data = d)
+    bw  <- max(1, h)
+    nw  <- NeweyWest(fit, lag = bw, prewhite = FALSE)
+    ct  <- coeftest(fit, vcov = nw)
+    
+    return(list(
+      beta = ct["d_gs1_hat", "Estimate"],
+      n    = nrow(d)
+    ))
+  }, error = function(e) NULL)
+}
+
+########################################################################
+# STEP 1: POINT ESTIMATES
+########################################################################
+
+cat("\n=== Computing point estimates ===\n")
+
+point_estimates <- list()
+
+for (c in commodities) {
+  cat("  Commodity:", c, "\n")
+  for (h in 0:horizon) {
+    
+    res_pre <- run_second_stage(
+      data           = df,
+      commodity_name = c,
+      h              = h,
+      lags           = lags,
+      curr_control   = curr_controls[[c]],
+      crisis_v       = crisis_vars[[c]],
+      sub_start      = pre_start,
+      sub_end        = pre_end,
+      fitted_col     = "d_gs1_hat_pre"
+    )
+    
+    res_post <- run_second_stage(
+      data           = df,
+      commodity_name = c,
+      h              = h,
+      lags           = lags,
+      curr_control   = curr_controls[[c]],
+      crisis_v       = crisis_vars[[c]],
+      sub_start      = post_start,
+      sub_end        = post_end,
+      fitted_col     = "d_gs1_hat_post"
+    )
+    
+    if (!is.null(res_pre) & !is.null(res_post)) {
+      point_estimates[[paste(c, h, sep = "_")]] <- data.frame(
+        commodity = c,
+        horizon   = h,
+        beta_pre  = res_pre$beta,
+        beta_post = res_post$beta,
+        beta_diff = res_post$beta - res_pre$beta,
+        n_pre     = res_pre$n,
+        n_post    = res_post$n
+      )
+    }
+  }
+}
+
+point_df <- bind_rows(point_estimates)
+cat("Point estimates computed:", nrow(point_df), "rows\n")
+print(head(point_df))
+
+########################################################################
+# STEP 2: TIME-CLUSTER BOOTSTRAP ON SECOND STAGE ONLY
+########################################################################
+
+cat("\n=== Running bootstrap (B =", breps, ") ===\n")
+
+dates_pre  <- df %>%
+  filter(date >= pre_start,  date <= pre_end)  %>%
+  pull(date) %>% unique() %>% sort()
+
+dates_post <- df %>%
+  filter(date >= post_start, date <= post_end) %>%
+  pull(date) %>% unique() %>% sort()
+
+nT_pre  <- length(dates_pre)
+nT_post <- length(dates_post)
+
+cat("Pre-period unique dates:", nT_pre, "\n")
+cat("Post-period unique dates:", nT_post, "\n")
+
+boot_results <- list()
+
+for (b in 1:breps) {
+  
+  if (b %% 50 == 0) cat("  Replication", b, "of", breps, "\n")
+  
+  boot_dates_pre  <- sample(dates_pre,  nT_pre,  replace = TRUE)
+  boot_dates_post <- sample(dates_post, nT_post, replace = TRUE)
+  
+  boot_df_pre <- map_dfr(seq_along(boot_dates_pre), function(i) {
+    df %>%
+      filter(date == boot_dates_pre[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  boot_df_post <- map_dfr(seq_along(boot_dates_post), function(i) {
+    df %>%
+      filter(date == boot_dates_post[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  for (c in commodities) {
+    for (h in 0:horizon) {
+      
+      res_pre <- run_second_stage(
+        data           = boot_df_pre,
+        commodity_name = c,
+        h              = h,
+        lags           = lags,
+        curr_control   = curr_controls[[c]],
+        crisis_v       = crisis_vars[[c]],
+        sub_start      = pre_start,
+        sub_end        = pre_end,
+        fitted_col     = "d_gs1_hat_pre"
+      )
+      
+      res_post <- run_second_stage(
+        data           = boot_df_post,
+        commodity_name = c,
+        h              = h,
+        lags           = lags,
+        curr_control   = curr_controls[[c]],
+        crisis_v       = crisis_vars[[c]],
+        sub_start      = post_start,
+        sub_end        = post_end,
+        fitted_col     = "d_gs1_hat_post"
+      )
+      
+      if (!is.null(res_pre) & !is.null(res_post)) {
+        boot_results[[length(boot_results) + 1]] <- data.frame(
+          commodity   = c,
+          horizon     = h,
+          rep         = b,
+          beta_pre_b  = res_pre$beta,
+          beta_post_b = res_post$beta,
+          beta_diff_b = res_post$beta - res_pre$beta
+        )
+      }
+    }
+  }
+}
+
+boot_df_results <- bind_rows(boot_results)
+cat("Bootstrap results:", nrow(boot_df_results), "rows\n")
+
+if (nrow(boot_df_results) == 0) {
+  stop("Bootstrap produced no results — check run_second_stage diagnostics")
+}
+
+########################################################################
+# STEP 3: BOOTSTRAP CONFIDENCE BANDS
+########################################################################
+
+cat("=== Computing confidence bands ===\n")
+
+boot_bands <- boot_df_results %>%
+  group_by(commodity, horizon) %>%
+  summarise(
+    nvalid       = n(),
+    lower_diff90 = quantile(beta_diff_b, 0.05,  na.rm = TRUE),
+    lower_diff68 = quantile(beta_diff_b, 0.16,  na.rm = TRUE),
+    upper_diff68 = quantile(beta_diff_b, 0.84,  na.rm = TRUE),
+    upper_diff90 = quantile(beta_diff_b, 0.95,  na.rm = TRUE),
+    lower_pre90  = quantile(beta_pre_b,  0.05,  na.rm = TRUE),
+    lower_pre68  = quantile(beta_pre_b,  0.16,  na.rm = TRUE),
+    upper_pre68  = quantile(beta_pre_b,  0.84,  na.rm = TRUE),
+    upper_pre90  = quantile(beta_pre_b,  0.95,  na.rm = TRUE),
+    lower_post90 = quantile(beta_post_b, 0.05,  na.rm = TRUE),
+    lower_post68 = quantile(beta_post_b, 0.16,  na.rm = TRUE),
+    upper_post68 = quantile(beta_post_b, 0.84,  na.rm = TRUE),
+    upper_post90 = quantile(beta_post_b, 0.95,  na.rm = TRUE),
+    .groups = "drop"
+  )
+
+########################################################################
+# STEP 4: MERGE AND SAVE
+########################################################################
+
+final_df <- point_df %>%
+  left_join(boot_bands, by = c("commodity", "horizon"))
+
+# Saved under new name to avoid overwriting original results
+write.csv(final_df,
+          paste0(input, "\\lp_iv_subsample_bootstrap_pre2007.csv"),
+          row.names = FALSE)
+cat("=== Saved lp_iv_subsample_bootstrap_pre2007.csv ===\n")
+
+########################################################################
+# STEP 5: PLOT
+########################################################################
+
+cat("=== Plotting ===\n")
+
+caption_base <- paste0(
+  "LP-IV: d_gs1 instrumented by Acosta et al. shock\n",
+  "First stage run separately per subsample on time series ",
+  "(macro controls only)\n",
+  "Second stage: full commodity controls | Newey-West SE\n",
+  "Time-cluster bootstrap on second stage, B=", breps,
+  " | Bands = 16th-84th (68%) and 5th-95th (90%) percentiles"
+)
+
+plot_theme <- theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major = element_line(color = "grey85",
+                                    linetype = "dashed"),
+    panel.grid.minor = element_blank(),
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.caption     = element_text(size = 8, hjust = 1),
+    legend.position  = "bottom",
+    axis.title       = element_text(size = 11)
+  )
+
+for (c in commodities) {
+  
+  d <- final_df %>% filter(commodity == c)
+  
+  # Pre-financialization IRF
+  p_pre <- ggplot(d, aes(x = horizon)) +
+    geom_ribbon(aes(ymin = lower_pre90, ymax = upper_pre90),
+                fill = "blue", alpha = 0.15) +
+    geom_ribbon(aes(ymin = lower_pre68, ymax = upper_pre68),
+                fill = "blue", alpha = 0.30) +
+    geom_line(aes(y = beta_pre),
+              color = "blue", linewidth = 0.8) +
+    geom_hline(yintercept = 0, color = "black") +
+    scale_x_continuous(breaks = seq(0, 24, 4)) +
+    labs(
+      title   = paste0(c, ": LP-IV IRF Pre-Financialization (1994-2007)"),
+      x       = "Months after shock",
+      y       = "Cumulative log price change",
+      caption = caption_base
+    ) +
+    plot_theme
+  
+  ggsave(paste0(output, "irf_", c, "_lpiv_pre2007_boot.png"),
+         p_pre, width = 10, height = 6, dpi = 200)
+  
+  # Post-financialization IRF
+  p_post <- ggplot(d, aes(x = horizon)) +
+    geom_ribbon(aes(ymin = lower_post90, ymax = upper_post90),
+                fill = "red", alpha = 0.15) +
+    geom_ribbon(aes(ymin = lower_post68, ymax = upper_post68),
+                fill = "red", alpha = 0.30) +
+    geom_line(aes(y = beta_post),
+              color = "red", linewidth = 0.8) +
+    geom_hline(yintercept = 0, color = "black") +
+    scale_x_continuous(breaks = seq(0, 24, 4)) +
+    labs(
+      title   = paste0(c, ": LP-IV IRF Post-Financialization (2010-2025)"),
+      x       = "Months after shock",
+      y       = "Cumulative log price change",
+      caption = caption_base
+    ) +
+    plot_theme
+  
+  ggsave(paste0(output, "irf_", c, "_lpiv_post2007_boot.png"),
+         p_post, width = 10, height = 6, dpi = 200)
+  
+  # Difference IRF
+  p_diff <- ggplot(d, aes(x = horizon)) +
+    geom_ribbon(aes(ymin = lower_diff90, ymax = upper_diff90),
+                fill = "darkgreen", alpha = 0.15) +
+    geom_ribbon(aes(ymin = lower_diff68, ymax = upper_diff68),
+                fill = "darkgreen", alpha = 0.30) +
+    geom_line(aes(y = beta_diff),
+              color = "darkgreen", linewidth = 0.8) +
+    geom_hline(yintercept = 0, color = "black") +
+    scale_x_continuous(breaks = seq(0, 24, 4)) +
+    labs(
+      title   = paste0(c, ": LP-IV Difference in IRF (Post minus Pre)"),
+      x       = "Months after shock",
+      y       = "Difference in cumulative log price change",
+      caption = paste0(
+        "Negative = stronger negative response post-financialization\n",
+        caption_base
+      )
+    ) +
+    plot_theme
+  
+  ggsave(paste0(output, "irf_", c, "_lpiv_diff2007_boot.png"),
+         p_diff, width = 10, height = 6, dpi = 200)
+  
+  cat("  Saved:", c, "pre, post, diff\n")
+}
+
+cat("=== Done ===\n")
+
+####################################################################################################################################
+
+
+#EXperiment: less control lags and similar to reduce uncertainty
+
+########################################################################
+# LP-IV SUBSAMPLE COMPARISON - Time-cluster Block Bootstrap
+# PARSIMONIOUS SPECIFICATION:
+# - No currency controls
+# - Crisis dummy lags reduced from 4 to 2
+# - Block bootstrap (block length = 12 months)
+# Pre-financialization (1994-2007) vs Post-financialization (2010-2025)
+########################################################################
+
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+library(purrr)
+library(lubridate)
+
+input  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\DTA"
+output <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\04 Output - figures and tables\\04 bootstrapping\\"
+
+if (!dir.exists(output)) dir.create(output, recursive = TRUE)
+
+########################################################################
+# LOAD DATA
+########################################################################
+
+df <- read_dta(paste0(input, "\\master_panel_gs1.dta"))
+
+df <- df %>%
+  mutate(
+    date    = as.Date("1960-01-01") %m+% months(as.integer(date)),
+    date_ym = format(date, "%Y-%m")
+  )
+
+if (!"d_gs1" %in% names(df)) stop("d_gs1 not found")
+cat("d_gs1 found. Non-NA obs:", sum(!is.na(df$d_gs1)), "\n")
+cat("Unique commodities:", paste(unique(df$commodity), collapse = ", "), "\n")
+cat("Date range:", format(min(df$date)), "to", format(max(df$date)), "\n")
+
+df <- df %>%
+  mutate(
+    gfc     = as.integer(date >= as.Date("2008-09-01") &
+                           date <= as.Date("2009-06-01")),
+    covid   = as.integer(date >= as.Date("2020-03-01") &
+                           date <= as.Date("2021-06-01")),
+    ukraine = as.integer(date >= as.Date("2022-02-01") &
+                           date <= as.Date("2022-12-01"))
+  )
+
+########################################################################
+# PARAMETERS
+########################################################################
+
+lags         <- 4       # kept at 4 for comparability with baseline
+crisis_lags  <- 2       # reduced from 4
+block_length <- 12      # block bootstrap block length in months
+breps        <- 500
+horizon      <- 24
+
+commodities <- c("Coffee", "Copper", "Gold", "Oil", "Soybeans", "Wheat")
+
+# No currency controls in parsimonious specification
+crisis_vars <- list(
+  Coffee   = c("gfc", "covid"),
+  Copper   = c("gfc", "covid"),
+  Gold     = c("gfc", "covid"),
+  Oil      = c("gfc", "covid", "ukraine"),
+  Soybeans = c("gfc", "covid", "ukraine"),
+  Wheat    = c("gfc", "covid", "ukraine")
+)
+
+pre_start  <- as.Date("1994-01-01")
+pre_end    <- as.Date("2007-12-01")
+post_start <- as.Date("2010-01-01")
+post_end   <- as.Date("2025-12-01")
+
+########################################################################
+# PRE-COMPUTE LAGS
+# Currency lags removed — only price, macro, and crisis lags needed
+########################################################################
+
+cat("=== Pre-computing lags ===\n")
+
+df <- df %>%
+  arrange(commodity, date) %>%
+  group_by(commodity) %>%
+  mutate(
+    lag1_dlp       = dplyr::lag(d_log_price, 1),
+    lag2_dlp       = dplyr::lag(d_log_price, 2),
+    lag3_dlp       = dplyr::lag(d_log_price, 3),
+    lag4_dlp       = dplyr::lag(d_log_price, 4),
+    lag1_ip_growth = dplyr::lag(ip_growth,   1),
+    lag2_ip_growth = dplyr::lag(ip_growth,   2),
+    lag3_ip_growth = dplyr::lag(ip_growth,   3),
+    lag4_ip_growth = dplyr::lag(ip_growth,   4),
+    lag1_inflation = dplyr::lag(inflation,   1),
+    lag2_inflation = dplyr::lag(inflation,   2),
+    lag3_inflation = dplyr::lag(inflation,   3),
+    lag4_inflation = dplyr::lag(inflation,   4),
+    # Crisis dummies — only 2 lags
+    lag0_gfc       = gfc,
+    lag1_gfc       = dplyr::lag(gfc,         1),
+    lag2_gfc       = dplyr::lag(gfc,         2),
+    lag0_covid     = covid,
+    lag1_covid     = dplyr::lag(covid,       1),
+    lag2_covid     = dplyr::lag(covid,       2),
+    lag0_ukraine   = ukraine,
+    lag1_ukraine   = dplyr::lag(ukraine,     1),
+    lag2_ukraine   = dplyr::lag(ukraine,     2)
+  ) %>%
+  ungroup()
+
+cat("Pre-computation done. Columns:", ncol(df), "\n")
+
+########################################################################
+# FIRST STAGE
+########################################################################
+
+cat("=== Running first stages ===\n")
+
+macro_controls <- c(
+  paste0("lag", 1:lags, "_ip_growth"),
+  paste0("lag", 1:lags, "_inflation")
+)
+
+fs_formula <- paste(
+  "d_gs1 ~ shock +",
+  paste(macro_controls, collapse = " + ")
+)
+
+run_first_stage <- function(data, start, end, label) {
+  
+  d_ts <- data %>%
+    filter(date >= start, date <= end) %>%
+    arrange(date) %>%
+    group_by(date) %>%
+    slice(1) %>%
+    ungroup() %>%
+    filter(!is.na(d_gs1), !is.na(shock)) %>%
+    drop_na(any_of(macro_controls))
+  
+  if (nrow(d_ts) < 10) stop(paste("Too few time-series obs for", label))
+  
+  fit <- lm(as.formula(fs_formula), data = d_ts)
+  
+  cat("\n--- First Stage:", label, "---\n")
+  cat("N:", nrow(d_ts), "\n")
+  cat("F-statistic:", round(summary(fit)$fstatistic[1], 2), "\n")
+  cat("R-squared:",   round(summary(fit)$r.squared, 4), "\n")
+  cat("shock coef:",  round(coef(fit)["shock"], 4),
+      "| t-stat:", round(summary(fit)$coefficients["shock", "t value"], 2), "\n")
+  
+  d_ts$d_gs1_hat <- fitted(fit)
+  return(d_ts %>% select(date, d_gs1_hat))
+}
+
+fs_pre  <- run_first_stage(df, pre_start,  pre_end,  "Pre  (1994-2007)")
+fs_post <- run_first_stage(df, post_start, post_end, "Post (2010-2025)")
+
+df <- df %>%
+  left_join(fs_pre  %>% rename(d_gs1_hat_pre  = d_gs1_hat), by = "date") %>%
+  left_join(fs_post %>% rename(d_gs1_hat_post = d_gs1_hat), by = "date")
+
+cat("\nFirst stage fitted values merged.\n")
+
+########################################################################
+# SECOND STAGE HELPER
+# Parsimonious: no currency controls, crisis_lags = 2
+########################################################################
+
+run_second_stage <- function(data, commodity_name, h,
+                             crisis_v, sub_start, sub_end,
+                             fitted_col) {
+  
+  d <- data %>%
+    filter(commodity == commodity_name,
+           date >= sub_start,
+           date <= sub_end) %>%
+    arrange(date)
+  
+  dep_var <- paste0("dep_h", h)
+  if (!dep_var %in% names(d))        return(NULL)
+  if (nrow(d) < 10)                  return(NULL)
+  if (!fitted_col %in% names(d))     return(NULL)
+  if (all(is.na(d[[fitted_col]])))   return(NULL)
+  
+  d$d_gs1_hat <- d[[fitted_col]]
+  
+  # Core controls — no currency
+  core_controls <- c(
+    paste0("lag", 1:lags, "_dlp"),
+    paste0("lag", 1:lags, "_ip_growth"),
+    paste0("lag", 1:lags, "_inflation")
+  )
+  
+  # Crisis dummies with reduced lags
+  crisis_controls <- c()
+  for (cv in crisis_v) {
+    crisis_controls <- c(crisis_controls,
+                         paste0("lag", 0:crisis_lags, "_", cv))
+  }
+  
+  full_controls <- c(core_controls, crisis_controls)
+  
+  missing_cols <- setdiff(
+    c(dep_var, "d_gs1_hat", full_controls),
+    names(d)
+  )
+  if (length(missing_cols) > 0) {
+    cat("Missing columns for", commodity_name, "h=", h, ":",
+        paste(missing_cols, collapse = ", "), "\n")
+    return(NULL)
+  }
+  
+  d <- d %>% drop_na(any_of(c(dep_var, "d_gs1_hat", full_controls)))
+  if (nrow(d) < 10) return(NULL)
+  
+  ss_formula <- paste(
+    dep_var, "~",
+    paste(c("d_gs1_hat", full_controls), collapse = " + ")
+  )
+  
+  tryCatch({
+    fit <- lm(as.formula(ss_formula), data = d)
+    bw  <- max(1, h)
+    nw  <- NeweyWest(fit, lag = bw, prewhite = FALSE)
+    ct  <- coeftest(fit, vcov = nw)
+    return(list(beta = ct["d_gs1_hat", "Estimate"], n = nrow(d)))
+  }, error = function(e) NULL)
+}
+
+########################################################################
+# STEP 1: POINT ESTIMATES
+########################################################################
+
+cat("\n=== Computing point estimates ===\n")
+
+point_estimates <- list()
+
+for (c in commodities) {
+  cat("  Commodity:", c, "\n")
+  for (h in 0:horizon) {
+    
+    res_pre <- run_second_stage(
+      data           = df,
+      commodity_name = c,
+      h              = h,
+      crisis_v       = crisis_vars[[c]],
+      sub_start      = pre_start,
+      sub_end        = pre_end,
+      fitted_col     = "d_gs1_hat_pre"
+    )
+    
+    res_post <- run_second_stage(
+      data           = df,
+      commodity_name = c,
+      h              = h,
+      crisis_v       = crisis_vars[[c]],
+      sub_start      = post_start,
+      sub_end        = post_end,
+      fitted_col     = "d_gs1_hat_post"
+    )
+    
+    if (!is.null(res_pre) & !is.null(res_post)) {
+      point_estimates[[paste(c, h, sep = "_")]] <- data.frame(
+        commodity = c,
+        horizon   = h,
+        beta_pre  = res_pre$beta,
+        beta_post = res_post$beta,
+        beta_diff = res_post$beta - res_pre$beta,
+        n_pre     = res_pre$n,
+        n_post    = res_post$n
+      )
+    }
+  }
+}
+
+point_df <- bind_rows(point_estimates)
+cat("Point estimates computed:", nrow(point_df), "rows\n")
+print(head(point_df))
+
+########################################################################
+# STEP 2: BLOCK BOOTSTRAP
+# Resample contiguous blocks of months separately for each subsample
+########################################################################
+
+cat("\n=== Running block bootstrap (B =", breps,
+    ", block =", block_length, "months) ===\n")
+
+dates_pre  <- df %>%
+  filter(date >= pre_start,  date <= pre_end)  %>%
+  pull(date) %>% unique() %>% sort()
+
+dates_post <- df %>%
+  filter(date >= post_start, date <= post_end) %>%
+  pull(date) %>% unique() %>% sort()
+
+nT_pre  <- length(dates_pre)
+nT_post <- length(dates_post)
+
+cat("Pre-period unique dates:",  nT_pre,  "\n")
+cat("Post-period unique dates:", nT_post, "\n")
+
+# ---- Block resampling helper ----
+resample_blocks <- function(dates, n_obs, block_len) {
+  
+  # Starting indices for valid blocks
+  valid_starts <- 1:(n_obs - block_len + 1)
+  n_blocks     <- ceiling(n_obs / block_len)
+  
+  # Sample block starting indices
+  chosen_starts <- sample(valid_starts, n_blocks, replace = TRUE)
+  
+  # Expand each block into its constituent dates
+  boot_dates <- map(chosen_starts, \(s) {
+    end_idx <- min(s + block_len - 1, n_obs)
+    dates[s:end_idx]
+  }) %>%
+    unlist() %>%
+    as.Date(origin = "1970-01-01") %>%
+    head(n_obs)   # trim to exact length
+  
+  boot_dates
+}
+
+boot_results <- list()
+
+for (b in 1:breps) {
+  
+  if (b %% 50 == 0) cat("  Replication", b, "of", breps, "\n")
+  
+  # Resample blocks for each subsample
+  boot_dates_pre  <- resample_blocks(dates_pre,  nT_pre,  block_length)
+  boot_dates_post <- resample_blocks(dates_post, nT_post, block_length)
+  
+  # Build bootstrap datasets
+  boot_df_pre <- map_dfr(seq_along(boot_dates_pre), \(i) {
+    df %>%
+      filter(date == boot_dates_pre[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  boot_df_post <- map_dfr(seq_along(boot_dates_post), \(i) {
+    df %>%
+      filter(date == boot_dates_post[i]) %>%
+      mutate(draw_id = i)
+  })
+  
+  for (c in commodities) {
+    for (h in 0:horizon) {
+      
+      res_pre <- run_second_stage(
+        data           = boot_df_pre,
+        commodity_name = c,
+        h              = h,
+        crisis_v       = crisis_vars[[c]],
+        sub_start      = pre_start,
+        sub_end        = pre_end,
+        fitted_col     = "d_gs1_hat_pre"
+      )
+      
+      res_post <- run_second_stage(
+        data           = boot_df_post,
+        commodity_name = c,
+        h              = h,
+        crisis_v       = crisis_vars[[c]],
+        sub_start      = post_start,
+        sub_end        = post_end,
+        fitted_col     = "d_gs1_hat_post"
+      )
+      
+      if (!is.null(res_pre) & !is.null(res_post)) {
+        boot_results[[length(boot_results) + 1]] <- data.frame(
+          commodity   = c,
+          horizon     = h,
+          rep         = b,
+          beta_pre_b  = res_pre$beta,
+          beta_post_b = res_post$beta,
+          beta_diff_b = res_post$beta - res_pre$beta
+        )
+      }
+    }
+  }
+}
+
+boot_df_results <- bind_rows(boot_results)
+cat("Bootstrap results:", nrow(boot_df_results), "rows\n")
+
+if (nrow(boot_df_results) == 0) {
+  stop("Bootstrap produced no results")
+}
+
+########################################################################
+# STEP 3: CONFIDENCE BANDS
+########################################################################
+
+cat("=== Computing confidence bands ===\n")
+
+boot_bands <- boot_df_results %>%
+  group_by(commodity, horizon) %>%
+  summarise(
+    nvalid       = n(),
+    lower_diff90 = quantile(beta_diff_b, 0.05,  na.rm = TRUE),
+    lower_diff68 = quantile(beta_diff_b, 0.16,  na.rm = TRUE),
+    upper_diff68 = quantile(beta_diff_b, 0.84,  na.rm = TRUE),
+    upper_diff90 = quantile(beta_diff_b, 0.95,  na.rm = TRUE),
+    lower_pre90  = quantile(beta_pre_b,  0.05,  na.rm = TRUE),
+    lower_pre68  = quantile(beta_pre_b,  0.16,  na.rm = TRUE),
+    upper_pre68  = quantile(beta_pre_b,  0.84,  na.rm = TRUE),
+    upper_pre90  = quantile(beta_pre_b,  0.95,  na.rm = TRUE),
+    lower_post90 = quantile(beta_post_b, 0.05,  na.rm = TRUE),
+    lower_post68 = quantile(beta_post_b, 0.16,  na.rm = TRUE),
+    upper_post68 = quantile(beta_post_b, 0.84,  na.rm = TRUE),
+    upper_post90 = quantile(beta_post_b, 0.95,  na.rm = TRUE),
+    .groups = "drop"
+  )
+
+########################################################################
+# STEP 4: MERGE AND SAVE
+########################################################################
+
+final_df <- point_df %>%
+  left_join(boot_bands, by = c("commodity", "horizon"))
+
+write.csv(
+  final_df,
+  paste0(input, "\\lp_iv_subsample_bootstrap_parsimonious.csv"),
+  row.names = FALSE
+)
+
+cat("=== Saved lp_iv_subsample_bootstrap_parsimonious.csv ===\n")
+
+########################################################################
+# STEP 5: SAMPLE SIZE REPORT
+# Check degrees of freedom gained vs original specification
+########################################################################
+
+cat("\n=== Sample size and regressor count check ===\n")
+
+for (c in commodities) {
+  n_crisis  <- length(crisis_vars[[c]]) * (crisis_lags + 1)
+  n_core    <- lags * 3          # dlp + ip_growth + inflation
+  n_total   <- 1 + n_core + n_crisis + 1   # intercept + core + crisis + d_gs1_hat
+  cat(c, "— regressors:", n_total,
+      "| pre obs at h=24 approx:", nT_pre - 24 - lags,
+      "| post obs at h=24 approx:", nT_post - 24 - lags, "\n")
+}
+
+cat("\n=== Done ===\n")
+
+########### PLOT
+
+# ---- Load new parsimonious results ----
+boot <- read.csv(paste0(input, "\\lp_iv_subsample_bootstrap_parsimonious.csv"))
+
+# ---- Reuse existing plotting code ----
+
+# Difference patched figure (all commodities)
+y_min_diff <- boot %>%
+  filter(commodity %in% commodities_boot) %>%
+  pull(lower_diff90) %>% min(na.rm = TRUE)
+
+y_max_diff <- boot %>%
+  filter(commodity %in% commodities_boot) %>%
+  pull(upper_diff90) %>% max(na.rm = TRUE)
+
+y_pad_diff <- (y_max_diff - y_min_diff) * 0.05
+y_lim_diff <- c(y_min_diff - y_pad_diff, y_max_diff + y_pad_diff)
+
+p_gold_d     <- make_boot_panel(boot, "Gold",     type = "diff",
+                                show_y_label = TRUE,  y_lim = y_lim_diff) +
+  labs(subtitle = "Gold")
+p_copper_d   <- make_boot_panel(boot, "Copper",   type = "diff",
+                                show_y_label = FALSE, y_lim = y_lim_diff) +
+  labs(subtitle = "Copper")
+p_oil_d      <- make_boot_panel(boot, "Oil",      type = "diff",
+                                show_y_label = FALSE, y_lim = y_lim_diff) +
+  labs(subtitle = "Oil")
+p_soybeans_d <- make_boot_panel(boot, "Soybeans", type = "diff",
+                                show_y_label = TRUE,  y_lim = y_lim_diff) +
+  labs(subtitle = "Soybeans")
+p_wheat_d    <- make_boot_panel(boot, "Wheat",    type = "diff",
+                                show_y_label = FALSE, y_lim = y_lim_diff) +
+  labs(subtitle = "Wheat")
+
+combined_diff <- (p_gold_d | p_copper_d | p_oil_d) /
+  (p_soybeans_d | p_wheat_d | plot_spacer()) +
+  plot_annotation(
+    title    = "Change in Monetary Policy Transmission: Post minus Pre Financialization",
+    subtitle = "Negative values indicate stronger negative price response post-financialization",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 13,
+                                   margin = margin(b = 4)),
+      plot.subtitle = element_text(size = 10, color = "grey40",
+                                   margin = margin(b = 10))
+    )
+  )
+
+ggsave(
+  filename = paste0(fig_path_boot, "diff only\\irf_boot_diff_patched_parsimonious.png"),
+  plot     = combined_diff,
+  width    = 15,
+  height   = 10,
+  dpi      = 300
+)
+
+# Individual triple plots (pre | post | diff)
+walk(commodities_boot, \(c) {
+  p <- make_boot_triple(boot, c)
+  if (!is.null(p)) {
+    ggsave(
+      filename = paste0(fig_path_boot, "irf_boot_", c,
+                        "_triple_parsimonious.png"),
+      plot     = p,
+      width    = 15,
+      height   = 5,
+      dpi      = 300
+    )
+    cat("Saved:", c, "\n")
+  }
+})
+
+cat("=== Parsimonious bootstrap plots saved ===\n")

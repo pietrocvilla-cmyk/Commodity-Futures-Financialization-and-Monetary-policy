@@ -1,0 +1,107 @@
+********* Master's thesis empirical analysis - Monetary economics************
+/* 
+
+Author: Pietro Villa 
+
+University: London School of Economics and Political Science
+Degree: MSc Economics 
+Date: 03-03-2025 
+Description: 
+This script performs the empirical work for the Master's final thesis on the effects of monetary policy shocks on commodity (futures) prices and the role of financialization
+
+*/
+
+
+
+* ---- 0. Set working directory ----
+global main "C:\Users\pitvi\OneDrive\Documenti\03 LSE\03 Dissertation"
+global input "$main\02 Data"
+global output "$main\04 Output - figures and tables"
+
+cd "$main"
+
+********PREPARE S&P500 DATA
+
+* Import Excel file
+import excel "$input\S&P 500 time series.xlsx", firstrow clear
+
+* Check what date looks like
+describe
+list in 1/5
+
+
+
+
+
+* Convert date to Stata monthly date
+gen date_stata = mofd(Date)
+format date_stata %tm
+drop Date
+rename date_stata date
+rename Value sp500
+
+* Compute monthly log return
+sort date
+tsset date
+
+gen sp500_return = log(sp500) - log(L.sp500)
+
+* Check
+list in 1/10
+sum sp500_return
+
+* Save
+save "$input\DTA\sp500_prepared.dta", replace
+di "=== sp500_prepared.dta saved ==="
+
+********************************************************************************
+* MERGE INTO MASTER PANEL — save as NEW file, do NOT overwrite master_panel
+********************************************************************************
+
+use "$input\DTA\master_panel.dta", clear
+
+merge m:1 date using "$input\DTA\sp500_prepared.dta", ///
+    keep(master match) nogenerate
+
+* Check
+sum sp500_return
+xtset commodity_id date
+
+* Save as new file
+save "$input\DTA\master_panel_sp500.dta", replace
+di "=== master_panel_sp500.dta saved ==="
+
+********************************************************************************
+* DIAGNOSTIC: Information Effect Check
+********************************************************************************
+
+use "$input\DTA\master_panel_sp500.dta", clear
+keep if commodity == "Coffee"
+tsset date
+
+* 1. Correlation
+di "=== Correlation: shock vs S&P500 return ==="
+correlate shock sp500_return
+pwcorr shock sp500_return, sig
+
+* 2. Regression test
+di "=== Regression: shock ~ sp500_return ==="
+regress shock sp500_return
+
+* 3. Scatter plot
+twoway ///
+    (scatter shock sp500_return, mcolor(blue%50) msize(small)) ///
+    (lfit shock sp500_return, lcolor(red) lwidth(medium)) ///
+    , ///
+    yline(0, lcolor(black) lpattern(dash)) ///
+    xline(0, lcolor(black) lpattern(dash)) ///
+    title("Monetary Policy Shock vs S&P500 Return") ///
+    xtitle("S&P500 monthly return") ///
+    ytitle("Acosta et al. shock") ///
+    note("Positive slope = information effect present" ///
+         "Negative slope = pure monetary tightening dominates")
+
+graph export "$output\diagnostic_shock_sp500.png", replace width(1600)
+di "=== diagnostic_shock_sp500.png saved ==="
+
+moses

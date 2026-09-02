@@ -1,7 +1,5 @@
 ############# Financialization measure #####################
-# ---- Read one Excel workbook with multiple sheets, compute NC gross share, plot separately ----
-# Workbook: "Financialization measures 1990-2025.xlsx"
-# Sheets: "Coffee", "Gold", "Crude oil", "Soybean", "Wheat", "Copper"
+## This code is creating my main financialization measures and it is carrying out their descrptive statistics
 
 library(readxl)
 library(dplyr)
@@ -14,25 +12,46 @@ library(scales)
 library(haven)
 
 # ---- File paths ----
-file_path  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\Financialization of commodities\\Financialization measures 1990-2025.xlsx"
-sp500_path <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\Financialization of commodities\\S&P 500 time series.xlsx"
-comm_path  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\Commodity prices data - LSEG.xlsx"
-fig_path   <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\04 Output - figures and tables\\00 descriptives\\"
-output_path <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\DTA\\"
+file_path  <- "Data/Financialization of commodities/Financialization measures 1990-2025.xlsx"
+sp500_path <- "Data/Financialization of commodities/S&P 500 time series.xlsx"
+comm_path  <- "Data/Financialization of commodities/Commodity prices data - LSEG.xlsx"
+fig_path   <- "Output/Descriptives/"
+dta_path <- "Data/DTA/"
 
 dir.create(fig_path,    showWarnings = FALSE, recursive = TRUE)
 dir.create(output_path, showWarnings = FALSE, recursive = TRUE)
 
-# ---- Sheet names ----
-sheets      <- c("Coffee", "Gold", "Crude oil", "Soybean", "Wheat", "Copper")
-comm_sheets <- c("Coffee", "Gold", "Oil", "Soybeans", "Wheat", "Copper")
+required_files <- c(file_path, sp500_path, comm_path)
+missing_files <- required_files[!file.exists(required_files)]
 
-# ---- Rolling window for S&P correlation (months) ----
+if (length(missing_files) > 0) {
+  stop("\n========================================\n",
+       "ERROR: Cannot find the following data file(s):\n",
+       paste(" -", missing_files, collapse = "\n"), "\n",
+       "========================================\n",
+       "Current working directory: ", getwd(), "\n\n",
+       "SOLUTION:\n",
+       "1. Close this script\n",
+       "2. In your file explorer, find the Futures_financialization_and_monetary_policy.Rproj file for this project\n",
+       "3. Double-click the .Rproj file to open the project\n",
+       "4. Then open and run this script\n",
+       "========================================\n")
+}else {
+  cat("✓ Working directory:", getwd(), "\n")
+  cat("✓ All data files found:\n")
+  cat(paste(" -", required_files, collapse = "\n"), "\n\n")
+}
+
+
+# Sheet names
+sheets      <- c("Gold", "Crude oil", "Soybean", "Wheat", "Copper")
+comm_sheets <- c("Gold", "Oil", "Soybeans", "Wheat", "Copper")
+
+# Rolling window for S&P correlation (months)
 roll_window <- 24
 
-# ---- Weights (Gold = 0 throughout) ----
+# Weights (Gold = 0 throughout)
 w_nc <- c(
-  "Coffee"    = 0.20,
   "Gold"      = 0.00,
   "Crude oil" = 0.20,
   "Soybean"   = 0.20,
@@ -41,7 +60,6 @@ w_nc <- c(
 )
 
 w_corr <- c(
-  "Coffee"   = 0.20,
   "Gold"     = 0.00,
   "Oil"      = 0.20,
   "Soybeans" = 0.20,
@@ -49,13 +67,16 @@ w_corr <- c(
   "Copper"   = 0.20
 )
 
-# ---- Sample period for .dta export ----
+# Sample period for .dta export
 sample_start <- as.Date("1992-01-01")
 sample_end   <- as.Date("2025-12-31")
 
 ###############################################################################
 # HELPERS
 ###############################################################################
+# This chunk standardizes text (e.g. column names) to lowercase, 
+# underscore-separated format by stripping whitespace and special characters
+# and handles inconsistent naming across different data sources.
 
 clean_names_simple <- function(x) {
   x %>%
@@ -72,8 +93,10 @@ pick <- function(df, candidates) {
 }
 
 ###############################################################################
-# SECTION 1 — NC GROSS SHARE (COT DATA)
+# SECTION 1 — NC GROSS SHARE
 ###############################################################################
+## This chunk creates the first financialization measure, which is non-commercial share of open interest positions in commodity futures. 
+# The measure, from now on known as NC Gross share, is constructed on data released weekly but aggregated to monthly.
 
 compute_from_sheet <- function(sheet_name) {
   df_raw <- read_excel(file_path, sheet = sheet_name)
@@ -133,7 +156,7 @@ compute_from_sheet <- function(sheet_name) {
 # Build dataset
 all_data <- map_dfr(sheets, compute_from_sheet)
 
-# ---- Per-commodity: monthly + 12-month rolling average ----
+# Per-commodity: monthly + 12-month rolling average
 roll_nc_plots <- all_data %>%
   split(.$commodity) %>%
   map(\(d) {
@@ -168,7 +191,11 @@ walk2(roll_nc_plots, names(roll_nc_plots), \(p, nm) {
   )
 })
 
-# ---- Weighted average NC gross share: monthly + 12-month rolling average ----
+### Weighted average NC gross share: monthly + 12-month rolling average. 
+## This code computes a weighted average of the monthly and smoothed data of all commodities except gold to show the general pattern. 
+# It is also possible to modify the weights of the average to see how different patterns emerge in different commodities/commodities groups. 
+# I compare the raw monthly process with a 12-month rolling average used to smooth the process. 
+
 missing_w_nc <- setdiff(unique(all_data$commodity), names(w_nc))
 if (length(missing_w_nc) > 0) stop(paste("No weight for:", paste(missing_w_nc, collapse = ", ")))
 if (abs(sum(w_nc) - 1) > 1e-8) stop(paste("NC weights sum to", sum(w_nc), "not 1."))
@@ -200,7 +227,7 @@ p_nc_wavg <- ggplot(wa_nc, aes(x = report_date)) +
   scale_y_continuous(labels = percent_format(accuracy = 1)) +
   labs(
     title    = "Weighted Average: NC Gross Share of Open Interest",
-    subtitle = "Equal weights across Coffee, Crude Oil, Soybean, Wheat, Copper — monthly vs 12-month rolling avg",
+    subtitle = "Equal weights across Crude Oil, Soybean, Wheat, Copper — monthly vs 12-month rolling avg",
     x = NULL, y = "Weighted average gross share"
   ) +
   theme_minimal() +
@@ -215,8 +242,10 @@ ggsave(
 ###############################################################################
 # SECTION 2 — S&P 500 ROLLING CORRELATION
 ###############################################################################
+## This chunk creates the second financialization measure, which is the rolling correlation between commodity futures returns and S&P 500 equity returns.
+# The measure, from now on known as S&P 500 correlation, is constructed as a 24-month rolling correlation of monthly log returns (roll_window <- 24).
 
-# ---- Load S&P 500 ----
+# Load S&P 500
 sp_raw <- read_excel(sp500_path, sheet = "1990-2026")
 names(sp_raw) <- clean_names_simple(names(sp_raw))
 
@@ -241,7 +270,7 @@ sp500 <- sp_raw %>%
   transmute(month, sp_ret = log(price / lag(price))) %>%
   filter(!is.na(sp_ret))
 
-# ---- Load commodity prices and compute monthly returns ----
+# Load commodity prices and compute monthly returns
 load_commodity <- function(sheet_name) {
   df_raw <- read_excel(comm_path, sheet = sheet_name)
   names(df_raw) <- clean_names_simple(names(df_raw))
@@ -269,7 +298,7 @@ load_commodity <- function(sheet_name) {
     filter(!is.na(comm_ret))
 }
 
-# ---- Compute 24-month rolling correlation per commodity ----
+# Compute 24-month rolling correlation per commodity
 compute_rolling_corr <- function(sheet_name) {
   comm <- load_commodity(sheet_name)
   merged <- inner_join(comm, sp500, by = "month") %>% arrange(month)
@@ -290,7 +319,7 @@ compute_rolling_corr <- function(sheet_name) {
 
 all_corr <- map_dfr(comm_sheets, compute_rolling_corr)
 
-# ---- Per-commodity correlation plots ----
+# Per-commodity correlation plots
 corr_plots <- all_corr %>%
   split(.$commodity) %>%
   map(\(d) {
@@ -317,7 +346,8 @@ walk2(corr_plots, names(corr_plots), \(p, nm) {
   )
 })
 
-# ---- Weighted average correlation ----
+## Weighted average correlation. As before, we compute a cross-commodity weighted average without gold to describe the overall pattern in the sample. 
+
 missing_w_corr <- setdiff(unique(all_corr$commodity), names(w_corr))
 if (length(missing_w_corr) > 0) stop(paste("No weight for:", paste(missing_w_corr, collapse = ", ")))
 if (abs(sum(w_corr) - 1) > 1e-8) stop(paste("Corr weights sum to", sum(w_corr), "not 1."))
@@ -360,34 +390,34 @@ ggsave(
 # SECTION 3 — EXPORT TO .DTA FOR STATA
 ###############################################################################
 
-# ---- NC gross share (all commodities, long format) ----
+# NC gross share (all commodities, long format)
 all_data %>%
   rename(date = report_date) %>%
   filter(date >= sample_start & date <= sample_end) %>%
   mutate(date = format(date, "%Y-%m-%d")) %>%
-  write_dta(paste0(output_path, "nc_gross_share.dta"))
+  write_dta(paste0(dta_path, "nc_gross_share.dta"))
 
-# ---- Weighted average NC gross share ----
+# Weighted average NC gross share
 wa_nc %>%
   rename(date = report_date) %>%
   filter(date >= sample_start & date <= sample_end) %>%
   mutate(date = format(date, "%Y-%m-%d")) %>%
   select(date, nc_gross_share_wavg) %>%
-  write_dta(paste0(output_path, "nc_gross_share_wavg.dta"))
+  write_dta(paste0(dta_path, "nc_gross_share_wavg.dta"))
 
-# ---- Rolling S&P 500 correlation (all commodities, long format) ----
+# Rolling S&P 500 correlation (all commodities, long format) ----
 all_corr %>%
   rename(date = month) %>%
   filter(date >= sample_start & date <= sample_end) %>%
   mutate(date = format(date, "%Y-%m-%d")) %>%
-  write_dta(paste0(output_path, "sp500_corr.dta"))
+  write_dta(paste0(dta_path, "sp500_corr.dta"))
 
-# ---- Weighted average S&P 500 correlation ----
+# Weighted average S&P 500 correlation
 wa_corr %>%
   rename(date = month) %>%
   filter(date >= sample_start & date <= sample_end) %>%
   mutate(date = format(date, "%Y-%m-%d")) %>%
   select(date, corr_wavg) %>%
-  write_dta(paste0(output_path, "sp500_corr_wavg.dta"))
+  write_dta(paste0(dta_path, "sp500_corr_wavg.dta"))
 
 cat("Done\n")

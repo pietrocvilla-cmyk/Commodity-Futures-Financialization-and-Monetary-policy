@@ -1,7 +1,5 @@
 ############# Financialization measure #####################
-# ---- Read one Excel workbook with multiple sheets, compute NC gross share, plot separately ----
-# Workbook: "Financialization measures 1990-2025.xlsx"
-# Sheets: "Coffee", "Gold", "Crude oil", "Soybean", "Wheat", "Copper"
+## This code creates the financialization measures and their descriptive statistics display. 
 
 library(readxl)
 library(dplyr)
@@ -13,16 +11,33 @@ library(zoo)
 library(scales)
 library(haven)
 
-# ---- File paths ----
-file_path  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\Financialization of commodities\\Financialization measures 1990-2025.xlsx"
-sp500_path <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\Financialization of commodities\\S&P 500 time series.xlsx"
-comm_path  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\Commodity prices data - LSEG.xlsx"
-fig_path   <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\04 Output - figures and tables\\00 descriptives\\"
-output_path <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\DTA\\"
+# Use simple relative path from project root
+file_path  <- "Data/Financialization of commodities/Financialization measures 1990-2025.xlsx"
+sp500_path <- "Data/S&P 500 time series.xlsx"
+comm_path  <- "Data/Commodity prices data - LSEG.xlsx"
+fig_path   <- "Output/00 descriptives"
+output_path <- "\\DTA\\"
 
 dir.create(fig_path,    showWarnings = FALSE, recursive = TRUE)
 dir.create(output_path, showWarnings = FALSE, recursive = TRUE)
 
+# Verify we're in the right place
+if (!file.exists(file_path)) {
+  stop("\n========================================\n",
+       "ERROR: Cannot find data file!\n",
+       "========================================\n",
+       "Expected file: data/Dataset finale.xlsx\n",
+       "Current working directory: ", getwd(), "\n\n",
+       "SOLUTION:\n",
+       "1. Close this script\n",
+       "2. In your file explorer, find: .Rproj\n",
+       "3. Double-click the .Rproj file to open the project\n",
+       "4. Then open and run this script\n",
+       "========================================\n")
+}
+
+cat("✓ Working directory:", getwd(), "\n")
+cat("✓ Data file found:", file_path, "\n\n")
 # ---- Sheet names ----
 sheets      <- c("Coffee", "Gold", "Crude oil", "Soybean", "Wheat", "Copper")
 comm_sheets <- c("Coffee", "Gold", "Oil", "Soybeans", "Wheat", "Copper")

@@ -13,8 +13,8 @@ library(haven)
 
 # ---- File paths ----
 file_path  <- "Data/Financialization of commodities/Financialization measures 1990-2025.xlsx"
-sp500_path <- "Data/Financialization of commodities/S&P 500 time series.xlsx"
-comm_path  <- "Data/Financialization of commodities/Commodity prices data - LSEG.xlsx"
+sp500_path <- "Data/S&P 500 time series.xlsx"
+comm_path  <- "Data/Commodity prices/Commodity prices.xlsx"
 fig_path   <- "Output/Descriptives/"
 dta_path <- "Data/DTA/"
 

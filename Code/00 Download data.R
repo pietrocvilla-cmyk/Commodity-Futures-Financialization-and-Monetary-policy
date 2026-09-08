@@ -3,12 +3,8 @@
 #
 #Purpose: download the raw data needed for the analysis on commodity futures financialization and monetary policy
 #
-#This script relies on the .Rproj file at the repository root to set the
-#working directory automatically: open the .Rproj file first, then run
-#this script. All paths below are relative to the repository root and
-#match the existing folder names in the GitHub repository exactly.
 #
-Scope of this script:
+#Scope of this script:
 #   - Downloads ONLY data available from FRED, restricted to the sample
 #     period below.
 #   - For data that cannot be retrieved this way (LSEG subscription data,

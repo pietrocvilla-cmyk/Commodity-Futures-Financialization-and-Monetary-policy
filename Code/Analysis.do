@@ -1,35 +1,52 @@
-********* Master's thesis empirical analysis - Monetary economics************
-/* 
+********************************************************************************************************************
+********* Has Futures Markets Financialization Changed Monetary Policy Transmission to Commodity Prices?************
+********************************************************************************************************************
+********************************************** Analysis Code *******************************************************
 
-Author: Pietro Villa 
 
-University: London School of Economics and Political Science
-Degree: MSc Economics 
-Date: 03-03-2025 
-Description: 
-This script performs the empirical work for the Master's final thesis on the effects of monetary policy shocks on commodity (futures) prices and the role of financialization
+*********** DATA CLEANING ************************
 
-*/
+***MASTER DIRECTORY SETUP
+*Edit ONLY the line below to match where you cloned this repository on
+*your own computer. Everything else uses relative paths from there.
 
-*********** DATA CLEANING **************************************
+* global root "C:/Users/yourname/my-repo"
 
-* ---- 0. Set working directory ----
-global main "C:\Users\pitvi\OneDrive\Documenti\03 LSE\03 Dissertation"
-global input "$main\02 Data"
-global output "$main\04 Output - figures and tables"
+* Subfolders (relative to root) -- should not need editing
+global input    "$root/Data"
+global output  "$root/Output"
+global dta     "$root/Data/DTA"
 
+* Verify the setup worked before running anything else
+
+cap confirm file "$input/S&P 500 time series.xlsx"
+if _rc {
+    di as error "ERROR: Cannot find expected data file."
+    di as error "Current global root: $root"
+    di as error "SOLUTION: edit the 'global root' line at the top of this"
+    di as error "script to point to your local clone of the repository."
+    exit 601
+}
+else {
+    di as result "✓ Root directory correctly set to: $root"
+}
 cd "$main"
 
-* ---- Build date spine ----
-* We will merge everything onto this
+*************
+
+*** Date spine setting ***
+*We build monthly date spine: full sample calendar used as master index
+*All datasets are merged onto this spine so monthly dates align and
+*missing observations can be filled consistently
+
 clear
 set obs 385  // 1994m1 to 2026m1 = 372 months
 gen date = ym(1994,1) + _n - 1
 format date %tm
 label variable date "Monthly date"
-save "$input\DTA\date_spine.dta", replace
+save "$input/DTA/date_spine.dta", replace
 
-***** ---- Monetary policy shocks ----
+*** Monetary policy shocks ***
 
 import excel "$input\Mps_data.xlsx", firstrow clear
 

@@ -10,16 +10,16 @@
 *Edit ONLY the line below to match where you cloned this repository on
 *your own computer. Everything else uses relative paths from there.
 
-* global root "C:/Users/yourname/my-repo"
+* global root "C:\Users\yourname\my-repo"
 
 * Subfolders (relative to root) -- should not need editing
-global input    "$root/Data"
-global output  "$root/Output"
-global dta     "$root/Data/DTA"
+global input    "$root\Data"
+global output  "$root\Output"
+global dta     "$root\Data\DTA"
 
 * Verify the setup worked before running anything else
 
-cap confirm file "$input/S&P 500 time series.xlsx"
+cap confirm file "$input\S&P 500 time series.xlsx"
 if _rc {
     di as error "ERROR: Cannot find expected data file."
     di as error "Current global root: $root"
@@ -32,7 +32,6 @@ else {
 }
 cd "$main"
 
-*************
 
 *** Date spine setting ***
 *We build monthly date spine: full sample calendar used as master index
@@ -44,70 +43,54 @@ set obs 385  // 1994m1 to 2026m1 = 372 months
 gen date = ym(1994,1) + _n - 1
 format date %tm
 label variable date "Monthly date"
-save "$input/DTA/date_spine.dta", replace
+save "$input\DTA\date_spine.dta", replace
 
-*** Monetary policy shocks ***
+*** Monetary policy shocks
 
 import excel "$input\Mps_data.xlsx", firstrow clear
 
-* Parse date and convert to Stata monthly
 gen date = mofd(Date)
 format date %tm
 
-* Scale ME to 25bp units
+* We scale ME to 25bp units to standardize MP shocks interpretation 
 destring ME, replace
 gen shock = ME / 0.25
 
-* Aggregate to monthly: sum shocks within each month
 collapse (sum) shock, by(date)
-
-* Merge onto date spine to fill in zeros for non-FOMC months
 merge 1:1 date using "date_spine.dta", nogenerate
 replace shock = 0 if missing(shock)
 
 sort date
-save "$input\DTA\mps_monthly.dta", replace
+save "$dta\mps_monthly.dta", replace
 
-***** ---- Commodity prices ----
-
-local sheets "Oil Gold Copper Soybeans Wheat Coffee"
-
+*** Commodity prices
+local sheets "Oil Gold Copper Soybeans Wheat"
 foreach s of local sheets {
 
-    import excel "$input\Commodity prices data - LSEG.xlsx", ///
+    import excel "$input\Commodity prices.xlsx", ///
         sheet("`s'") cellrange(A2) clear
-
-    * Drop first column (LSEG function name — not useful)
     drop A
-
-    * Rename remaining columns
     rename B date_raw
     rename C price
 
-    * Make sure price is numeric
     destring price, replace force
 
-    * Convert to monthly
     gen date = mofd(date_raw)
     format date %tm
 
-    * Drop obs outside sample period before any other operations
+* We drop obs outside sample period before any other operations
     keep if date >= ym(1994,1) & date <= ym(2025,12)
 
-
-    * Log price level — needed to construct LP dependent variables
+    * We take Log price level needed to construct LP dependent variables
     sort date
     gen log_price = log(price)
 
-    * One-period log change — used as lagged control in LP
     gen d_log_price = log_price - log_price[_n-1]
 
-    * Commodity identifier
     gen commodity = "`s'"
 
-    * Keep only what is needed
     keep date commodity price log_price d_log_price
-
+/*
     * Quick check
     di "=== `s' ==="
     di "Observations: " _N
@@ -116,11 +99,12 @@ foreach s of local sheets {
     sum price, detail
 
     save "temp_`s'.dta", replace
+*/
 }
 
-**** Append long format 
+*** We merge all the commodity prices variables in one file 
 use "temp_Oil.dta", clear
-foreach s in Gold Copper Soybeans Wheat Coffee {
+foreach s in Gold Copper Soybeans Wheat {
     append using "temp_`s'.dta"
 }
 
@@ -135,29 +119,13 @@ tabstat price log_price d_log_price, ///
 
 table commodity, stat(min date) stat(max date) stat(count price)
 
-* Visual check
-twoway ///
-    (line log_price date if commodity == "Oil") ///
-    (line log_price date if commodity == "Gold") ///
-    (line log_price date if commodity == "Copper") ///
-    (line log_price date if commodity == "Soybeans") ///
-    (line log_price date if commodity == "Wheat") ///
-    (line log_price date if commodity == "Coffee"), ///
-    legend(order(1 "Oil" 2 "Gold" 3 "Copper" ///
-                 4 "Soybeans" 5 "Wheat" 6 "Coffee")) ///
-    xline(`=ym(2004,1)', lcolor(red) lpattern(dash)) ///
-    title("Commodity Log Prices 1994-2025") ///
-    xtitle("") ytitle("Log price") ///
-    note("Red dashed line = 2004 financialization break")
-graph export "$output\commodity_log_prices.png", replace width(2000)
-
 sort commodity_id date
 order commodity commodity_id date price log_price d_log_price
 compress
-save "$input\DTA\prices_long.dta", replace
+save "$dta\prices_long.dta", replace
 
 * Clean up temp files
-local sheets "Oil Gold Copper Soybeans Wheat Coffee"
+local sheets "Oil Gold Copper Soybeans Wheat"
 foreach s of local sheets {
     erase "temp_`s'.dta"
 }
@@ -167,27 +135,21 @@ di "Total observations: " _N
 di "Commodities: 6"
 di "Sample: 1994m1 to 2025m12"
 
-
-* INDUSTRIAL PRODUCTION
+*** Industrial output 
 * Monthly, seasonally adjusted, already in growth terms
-********************************************************************************
-
 import excel "$input\indpro.xlsx", firstrow clear
-
-* Check what came in
 describe
 list in 1/5
 
-* Rename columns — adjust if FRED used different headers
+*We rename columns to adjust if FRED used different headers
 rename observation_date date_raw
 rename INDPRO_PCH ip_growth
 
-* Parse date
 gen date = mofd(date_raw)
 format date %tm
 drop date_raw
 
-* Keep slightly wider than sample for lag construction
+* We keep slightly wider than sample for lag construction
 keep if date >= ym(1993,1) & date <= ym(2025,12)
 
 sort date
@@ -199,41 +161,24 @@ di "Start: " %tm date[1]
 di "End:   " %tm date[_N]
 sum ip_growth, detail
 
-* Visual check
-twoway line ip_growth date, ///
-    title("US Industrial Production Growth") ///
-    xline(`=ym(2004,1)', lcolor(red) lpattern(dash)) ///
-    xtitle("") ytitle("Growth rate") ///
-    yline(0, lcolor(black) lpattern(solid)) ///
-    note("Red dashed line = 2004 financialization break")
-
-graph export "$output\ip_growth.png", replace width(2000)
-
-* Keep only what is needed
 keep date ip_growth
 sort date
-save "$input\DTA\ip.dta", replace
+save "$dta\ip.dta", replace
 
 di "=== ip.dta saved ==="
 
-****************** Inflation
-
+*** Inflation
 import excel "$input\inflation.xlsx", firstrow clear
-
-* Check what came in
 describe
 list in 1/5
 
-* Rename — adjust column name based on describe output
 rename observation_date date_raw
 rename CPIAUCSL_PCH inflation
 
-* Date already Stata daily date — convert directly to monthly
 gen date = mofd(date_raw)
 format date %tm
 drop date_raw
 
-* Keep slightly wider than sample for lag construction
 keep if date >= ym(1993,1) & date <= ym(2025,12)
 
 sort date
@@ -245,32 +190,20 @@ di "Start: " %tm date[1]
 di "End:   " %tm date[_N]
 sum inflation, detail
 
-* Visual check
-twoway line inflation date, ///
-    title("US CPI Inflation (Month-on-Month Percent Change)") ///
-    xline(`=ym(2004,1)', lcolor(red) lpattern(dash)) ///
-    xtitle("") ytitle("Percent change") ///
-    yline(0, lcolor(black) lpattern(solid)) ///
-    note("Red dashed line = 2004 financialization break")
-
-graph export "$output\inflation.png", replace width(2000)
-
 keep date inflation
 sort date
-save "$input\DTA\cpi.dta", replace
+save "$dta\cpi.dta", replace
 
 di "=== cpi.dta saved ==="
 
-********************************************************************************
-* 7. EXCHANGE RATES
-* us_brazil.xlsx — BRL/USD (soybeans and coffee)
-* us_aus.xlsx    — AUD/USD (copper and gold)
-* us_chile.xlsx  — CLP/USD (copper robustness)
-* Save to $input\DTA
-********************************************************************************
+*** Exchange rates
+* Us-brazil.xlsx — BRL/USD (soybeans)
+* Us-aus.xlsx    — AUD/USD (copper and gold)
+* Us-chile.xlsx  — CLP/USD (copper)
+* Save to $dta
 
 * Define local with file and variable names
-local fx_files  "us_brazil us_aus us_chile"
+local fx_files  "Us-brazil Us-aus Us-chile"
 local fx_names  "d_brl d_aud d_clp"
 local fx_titles "BRAXUSAL DEXBZUS CCUSMA02CLM618N"
 
@@ -288,11 +221,10 @@ forvalues i = 1/`n' {
     describe
     list in 1/5
 
-    * Rename — adjust column names based on describe output
-    * Typically FRED uses observation_date and the series code
+
     rename observation_date date_raw
 
-    * Rename whatever the rate column is called to a temp name
+    * We rename whatever the rate column is called to a temp name
     * We will figure out exact name from describe — placeholder below
     * rename DEXBZUS rate   // for BRL
     * rename DEXAUS  rate   // for AUD
@@ -302,21 +234,17 @@ forvalues i = 1/`n' {
     local ratecol `r(varlist)'
     rename `ratecol' rate
 
-    * Date already Stata daily — convert to monthly
     gen date = mofd(date_raw)
     format date %tm
     drop date_raw
 
-    * Daily to monthly: keep end-of-month observation
     sort date date
     by date: keep if _n == _N
 
-    * Keep slightly wider than sample
     keep if date >= ym(1993,1) & date <= ym(2025,12)
 
     sort date
 
-    * Log change
     gen `vname' = log(rate) - log(rate[_n-1])
 
     * Check
@@ -326,124 +254,87 @@ forvalues i = 1/`n' {
     di "End:   " %tm date[_N]
     sum rate `vname', detail
 
-    * Visual check
-    twoway line `vname' date, ///
-        title("`title' Log Change") ///
-        xline(`=ym(2004,1)', lcolor(red) lpattern(dash)) ///
-        xtitle("") ytitle("Monthly log change") ///
-        yline(0, lcolor(black) lpattern(solid)) ///
-        note("Red dashed line = 2004 financialization break")
-
-    graph export "$output\\`file'_logchange.png", replace width(2000)
-
+    
     keep date `vname'
     sort date
-    save "$input\DTA\\`file'.dta", replace
+    save "$dta\\`file'.dta", replace
 
     di "=== `file'.dta saved ==="
 }
 
-************ Financialization measures *************************
+*** Financialization measures
+** NC gross share
+use "$dta\nc_gross_share.dta", clear
 
-use "$input\DTA\nc_gross_share.dta", clear
-
-* Convert string date to Stata monthly
-gen date_daily = date(date, "YMD")
-format date_daily %td
-gen date_m = mofd(date_daily)
-format date_m %tm
-drop date date_daily
-rename date_m date
-
-* Data already collapsed to monthly means in R
-* Verify: should be exactly 1 observation per commodity-month
+* Verify that data already collapsed to monthly means in R: should be exactly 1 observation per commodity-month
 duplicates report commodity date
 * If duplicates = 0, data is clean
 
-* Check
 list commodity date nc_gross_share in 1/5
 tabstat nc_gross_share, by(commodity) stat(n mean sd min max) nototal
 
-* Save
 sort commodity date
-save "$input\DTA\nc_gross_share_monthly.dta", replace
+save "$dta\nc_gross_share_monthly.dta", replace
 di "=== nc_gross_share_monthly.dta saved ==="
 
-* ---- SP500 Rolling Correlation ----
-use "$input\DTA\sp500_corr.dta", clear
+** SP500 Rolling Correlation
+use "$dta\sp500_corr.dta", clear
 
-* Check
 describe
 list in 1/5
 
-* Convert string date to Stata monthly
-gen date_daily = date(date, "YMD")
-format date_daily %td
-gen date_m = mofd(date_daily)
-format date_m %tm
-drop date date_daily
-rename date_m date
-
-* Data is already monthly (rolling correlation computed on monthly returns)
-* so no collapse needed — just check obs count
 tabstat rolling_corr, by(commodity) stat(n mean sd min max) nototal
 
-* Check date coverage
 table commodity, stat(min date) stat(max date) stat(count rolling_corr)
 
-* Save
 sort commodity date
-save "$input\DTA\sp500_corr_monthly.dta", replace
+save "$dta\sp500_corr_monthly.dta", replace
 di "=== sp500_corr_monthly.dta saved ==="
 
-* 8. MERGE INTO MASTER PANEL
-* prices_long.dta is the spine — everything merges onto it
-********************************************************************************
+*** Merge everything into master data panel
+* prices_long.dta is the spine, so everything merges onto it
 
-use "$input\DTA\prices_long.dta", clear
+use "$dta\prices_long.dta", clear
 
-
-merge m:1 date using "$input\DTA\mps_monthly.dta",  keep(1 3) nogenerate
+merge m:1 date using "$dta\mps_monthly.dta",  keep(1 3) nogenerate
 di "After MPS merge: " _N " obs"
 
-merge m:1 date using "$input\DTA\ip.dta",           keep(1 3) nogenerate
+merge m:1 date using "$dta\ip.dta",           keep(1 3) nogenerate
 di "After IP merge: " _N " obs"
 
-merge m:1 date using "$input\DTA\cpi.dta",          keep(1 3) nogenerate
+merge m:1 date using "$dta\cpi.dta",          keep(1 3) nogenerate
 di "After CPI merge: " _N " obs"
 
-merge m:1 date using "$input\DTA\us_brazil.dta",          keep(1 3) nogenerate
+merge m:1 date using "$dta\us_brazil.dta",          keep(1 3) nogenerate
 di "After BRL merge: " _N " obs"
 
-merge m:1 date using "$input\DTA\us_aus.dta",          keep(1 3) nogenerate
+merge m:1 date using "$dta\us_aus.dta",          keep(1 3) nogenerate
 di "After AUD merge: " _N " obs"
 
-merge m:1 date using "$input\DTA\us_chile.dta",     keep(1 3) nogenerate
+merge m:1 date using "$dta\us_chile.dta",     keep(1 3) nogenerate
 di "After CLP merge: " _N " obs"
 
 
 
-* ---- Financialization measures (m:1 on commodity AND date) ----
-* These vary by commodity so merge on both keys
+* Financialization measures: since these vary by commodity so merge on both keys, date and commodity
 merge 1:1 commodity date using ///
-    "$input\DTA\nc_gross_share_monthly.dta", ///
+    "$dta\nc_gross_share_monthly.dta", ///
     keep(1 3) nogenerate
 
 merge 1:1 commodity date using ///
-    "$input\DTA\sp500_corr_monthly.dta", ///
+    "$dta\sp500_corr_monthly.dta", ///
     keep(1 3) nogenerate
 
-* ---- Replace missing shocks with zero ----
-* Months with no FOMC meeting
-*replace shock = 0 if missing(shock)
+* We replace missing shocks (Months with no FOMC meeting) with 0s
+replace shock = 0 if missing(shock)
 
-* ---- Re-set panel structure ----
 sort commodity_id date
 xtset commodity_id date
 
 ********************************************************************************
-* GENERATE LP DEPENDENT VARIABLES
+* LOCAL PROJECTION MODELS
 ********************************************************************************
+*********** Local projections preparatory work ***************************
 
 forvalues h = 0/24 {
     by commodity_id: gen dep_h`h' = log_price[_n+`h'] - log_price[_n-1]

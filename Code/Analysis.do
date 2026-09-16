@@ -291,6 +291,21 @@ sort commodity date
 save "$dta\sp500_corr_monthly.dta", replace
 di "=== sp500_corr_monthly.dta saved ==="
 
+*** Endogenous monetary policy 
+import excel "$input\Treasury.xlsx", firstrow clear
+
+gen date_stata = mofd(date)
+format date_stata %tm
+drop date
+rename date_stata date
+rename yield gs1
+
+sort date
+tsset date
+gen d_gs1 = gs1 - L.gs1
+
+save "$dta\gs1_prepared.dta", replace
+
 *** Merge everything into master data panel
 * prices_long.dta is the spine, so everything merges onto it
 
@@ -314,7 +329,8 @@ di "After AUD merge: " _N " obs"
 merge m:1 date using "$dta\us_chile.dta",     keep(1 3) nogenerate
 di "After CLP merge: " _N " obs"
 
-
+merge m:1 date using "$dta\gs1_prepared.dta",  keep(1 3) nogenerate
+di "After  merge Treasuries merge: " _N " obs"
 
 * Financialization measures: since these vary by commodity so merge on both keys, date and commodity
 merge 1:1 commodity date using ///
@@ -334,16 +350,14 @@ xtset commodity_id date
 ********************************************************************************
 * LOCAL PROJECTION MODELS
 ********************************************************************************
-*********** Local projections preparatory work ***************************
+*********** Local projections preparatory work *********************************
 
 forvalues h = 0/24 {
     by commodity_id: gen dep_h`h' = log_price[_n+`h'] - log_price[_n-1]
     label variable dep_h`h' "Cumulative log price change horizon `h'"
 }
 
-********************************************************************************
-* SUBSAMPLE INDICATORS
-********************************************************************************
+**** Subsample time indicators 
 
 * Binary post indicator
 gen post = .
@@ -358,10 +372,6 @@ replace subsample = "post" if date >= ym(2010,1) & date <= ym(2025,12)
 
 label variable post "0=pre (1994-2003), 1=post (2010-2025), .=transition (2004-2009)"
 
-********************************************************************************
-* CHECKS
-********************************************************************************
-
 di "=== MISSING VALUE CHECK ==="
 foreach v of varlist shock ip_growth inflation nc_gross_share rolling_corr {
     quietly count if missing(`v')
@@ -373,11 +383,6 @@ tabstat shock ip_growth inflation nc_gross_share rolling_corr, ///
 
 table commodity, stat(min date) stat(max date) stat(count dep_h0)
 
-********************************************************************************
-* ORDER AND SAVE — last step
-********************************************************************************
-
-order commodity commodity_id date ///
       price log_price d_log_price ///
       shock ///
       ip_growth inflation ///
@@ -387,69 +392,27 @@ order commodity commodity_id date ///
       subsample post
 
 compress
-save "$input\DTA\master_panel.dta", replace
+save "$dta\master_panel.dta", replace
 
 di "=== master_panel.dta saved ==="
 di "Total observations: " _N
 di "Variables: " c(k)
 
-************** Endogenous monetary policy merge 
-
-import excel "$input\treasury.xlsx", firstrow clear
-
-* Check import
-describe
-list in 1/5
-
-* Convert date — Excel numeric date
-gen date_stata = mofd(date)
-format date_stata %tm
-drop date
-rename date_stata date
-rename yield gs1
-
-* Set time series and generate change
-sort date
-tsset date
-gen d_gs1 = gs1 - L.gs1
-
-* Check
-list in 1/10
-sum gs1 d_gs1
-
-* Save
-save "$input\DTA\gs1_prepared.dta", replace
-di "=== gs1_prepared.dta saved ==="
-
-********************************************************************************
-* STEP 2: MERGE INTO MASTER PANEL — save as NEW file
-********************************************************************************
-
-use "$input\DTA\master_panel.dta", clear
-
-merge m:1 date using "$input\DTA\gs1_prepared.dta", ///
-    keep(master match) nogenerate
-
-* Check
-sum gs1 d_gs1
-xtset commodity_id date
-
 * Save as new file — do NOT overwrite master_panel
-save "$input\DTA\master_panel_gs1.dta", replace
+save "$dta\master_panel_gs1.dta", replace
 di "=== master_panel_gs1.dta saved ==="
 
-*****************************************************
-*DATA ANALYSIS - LOCAL PROJECTIONS
-******************************************************
-*ANALYSIS 1 - BASELINE model (no interaction or subdivision)
-* Here we run  the baseline model on the whole sample with crises dummies and relevant controls
 
-********LP-IV BASELINE - 1-Year Treasury (first difference)
+**********************ANALYSIS 1 - BASELINE model (no interaction or subdivision)**********************
+** Here we estimate the baseline local-projection model over the full sample period. 
+* The specification includes crisis-period dummy variables to control for unusual economic conditions during major crises, 
+* as well as the relevant macroeconomic and financialization controls. 
+* This provides the main benchmark estimate of the response of commodity prices to monetary policy shocks.
 
-use "$input\DTA\master_panel_gs1.dta", clear
+*****LP-IV BASELINE - 1-Year Treasury (first difference)
+
+use "$dta\master_panel_gs1.dta", clear
 xtset commodity_id date
-
-
 
 global lags    4
 global horizon 24
@@ -466,11 +429,13 @@ gen gfc     = (date >= tm(2008m9)  & date <= tm(2009m6))
 gen covid   = (date >= tm(2020m3)  & date <= tm(2021m6))
 gen ukraine = (date >= tm(2022m2)  & date <= tm(2022m12))
 
-local commodities "Coffee Copper Gold Oil Soybeans Wheat"
+local commodities "Copper Gold Oil Soybeans Wheat"
 
-********************************************************************************
-* FIRST STAGE: get fitted values of d_gs1
-********************************************************************************
+***** FIRST STAGE: get fitted values of d_gs1
+** The first stage identifies the endogenous change in the 1-year Treasury yield
+* using the high-frequency monetary-policy shock as the excluded instrument.
+* regress d_gs1 shock. 
+
 
 preserve
     duplicates drop date, force
@@ -486,6 +451,9 @@ preserve
     di "  R-squared:   " %7.4f e(r2)
     di "  N:           " e(N)
 
+** We generate fitted values from the first stage. These predicted changes in the
+* Treasury yield are used as the instrumented monetary-policy variable in the LP.
+
     predict d_gs1_hat, xb
     keep date d_gs1_hat
     sort date
@@ -493,16 +461,11 @@ preserve
     save `fittedvals'
 restore
 
-* Merge fitted values back into panel
 merge m:1 date using `fittedvals', nogenerate
 sort commodity_id date
 xtset commodity_id date
 
-********************************************************************************
-* LOOP
-********************************************************************************
-
-* Create results file — defined AFTER first stage preserve/restore
+**** LOOP
 tempfile results
 preserve
     clear
@@ -547,6 +510,10 @@ foreach c of local commodities {
 
         local bw = max(1, `h')
 
+** We estimate cumulative impulse responses for horizons 0 to 24 months.
+* The Newey-West bandwidth increases with the horizon to account for
+* serial correlation in the local-projection residuals.
+
         quietly newey dep_h`h' d_gs1_hat ///
             `depvarlags' `macrolags' `currlags' `crisislags' ///
             if commodity == "`c'", lag(`bw')
@@ -578,23 +545,17 @@ foreach c of local commodities {
     }
 }
 
-********************************************************************************
-* SAVE
-********************************************************************************
-
 use `results', clear
 sort commodity horizon
 
-save "$input\DTA\lp_iv_gs1_baseline.dta", replace
+save "$dta\lp_iv_gs1_baseline.dta", replace
 di "=== lp_iv_gs1_baseline.dta saved ==="
 di "Total rows: " _N
 list in 1/5
 
-********************************************************************************
-* PLOT
-********************************************************************************
+*** We now plot the results 
 
-use "$input\DTA\lp_iv_gs1_baseline.dta", clear
+use "$dta\lp_iv_gs1_baseline.dta", clear
 
 local commodities "Coffee Copper Gold Oil Soybeans Wheat"
 

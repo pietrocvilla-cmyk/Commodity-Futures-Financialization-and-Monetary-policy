@@ -597,7 +597,7 @@ list in 1/5
 
 use "$dta\lp_iv_gs1_baseline.dta", clear
 
-local commodities "Coffee Copper Gold Oil Soybeans Wheat"
+local commodities "Copper Gold Oil Soybeans Wheat"
 
 foreach c of local commodities {
 
@@ -631,82 +631,6 @@ foreach c of local commodities {
 
 use "$dta\master_panel_gs1.dta", clear
 xtset commodity_id date
-
-* CHECK 1: NC gross share is monthly mean (one obs per commodity-month)
-
-
-di "=== CHECK 1: NC Gross Share — one obs per commodity-month ==="
-duplicates report commodity date
-* Should show 0 duplicates
-
-* Summary by commodity — check mean and SD look reasonable
-tabstat nc_gross_share, by(commodity) stat(n mean sd min max) nototal
-
-* Check first few obs per commodity
-foreach c in Coffee Copper Gold Oil Soybeans Wheat {
-    di "--- `c' ---"
-    list date nc_gross_share if commodity == "`c'" in 1/5
-}
-
-* CHECK 2: Rolling correlation coverage by commodity
-
-di "=== CHECK 2: Rolling Correlation Coverage ==="
-tabstat rolling_corr, by(commodity) stat(n mean sd min max) nototal
-
-* Check start date per commodity — should be ~24 months after price data starts
-table commodity, stat(min date) stat(max date) stat(count rolling_corr)
-
-* Flag commodities with missing rolling_corr
-foreach c in Coffee Copper Gold Oil Soybeans Wheat {
-    quietly count if missing(rolling_corr) & commodity == "`c'"
-    di "`c': missing rolling_corr = " r(N)
-}
-
-* Visual check — is missingness concentrated at start of sample?
-foreach c in Coffee Copper Gold Oil Soybeans Wheat {
-    di "--- `c': first non-missing rolling_corr ---"
-    list date rolling_corr if commodity == "`c'" & !missing(rolling_corr) ///
-        in 1/3
-}
-
-* CHECK 4: Compare sample sizes between the two financialization measures
-* After applying L1 (one additional lag) as in the interaction model
-
-di "=== CHECK 4: Effective sample sizes after L1 lag ==="
-
-foreach c in Coffee Copper Gold Oil Soybeans Wheat {
-
-    * nc_gs_ma12 lagged one period
-    quietly count if !missing(L1.nc_gs_ma12) & commodity == "`c'"
-    local n_nc = r(N)
-
-    * rolling_corr lagged one period
-    quietly count if !missing(L1.rolling_corr) & commodity == "`c'"
-    local n_corr = r(N)
-
-    di "`c': L1.nc_gs_ma12 non-missing = `n_nc' | L1.rolling_corr non-missing = `n_corr'"
-    
-    if `n_nc' != `n_corr' {
-        di as error "  WARNING: sample size differs between measures for `c'"
-    }
-}
-
-* CHECK 5: Standardization preview
-* Show mean and SD that will be used in the interaction loop
-
-di "=== CHECK 5: Standardization preview ==="
-
-foreach c in Coffee Copper Gold Oil Soybeans Wheat {
-    di "--- `c' ---"
-    foreach fm in nc_gs_ma12 rolling_corr {
-        quietly sum L1.`fm' if commodity == "`c'"
-        di "  L1.`fm': mean=" %6.4f r(mean) ///
-           " sd=" %6.4f r(sd) ///
-           " N=" r(N)
-    }
-}
-
-di "=== All checks complete — safe to proceed with interaction model ==="
 
 ******************************* ANALYSIS 2 - INTERACTION MODEL **********************************************************
 * Financialization is standardized separately within each commodity.
@@ -873,15 +797,13 @@ foreach c of local commodities {
             local bw = max(1, `h')
 
             * Second stage regression
-            * kanzigcontrols is empty string for non-Oil commodities
-            * so including it is harmless — Stata ignores empty locals
-            quietly newey dep_h`h' ///
+            * kanzigcontrols is empty string for non-Oil commodities ///
                 d_gs1_hat d_gs1_x_fin_temp fin_std_temp ///
                 `depvarlags' `macrolags' `currlags' ///
                 `crisislags' `kanzigcontrols' ///
                 if commodity == "`c'", lag(`bw')
 
-            * Extract coefficients
+            * We extract coefficients
             local beta_shock  = _b[d_gs1_hat]
             local se_shock    = _se[d_gs1_hat]
             local beta_int    = _b[d_gs1_x_fin_temp]
@@ -892,7 +814,7 @@ foreach c of local commodities {
             local lower_int68 = `beta_int' - 1.000 * `se_int'
             local obs         = e(N)
 
-            * Diagnostic output at selected horizons
+            * Deliver diagnostic output at selected horizons
             if (`h' == 0 | `h' == 12 | `h' == 24) & "`c'" == "Oil" {
                 di "  Oil h=`h' | beta_int=" %7.4f `beta_int' ///
                    " se=" %7.4f `se_int' ///
@@ -903,8 +825,6 @@ foreach c of local commodities {
                        " L2=" %7.4f _b[L2.kanzig_shock]
                 }
             }
-
-            * Save results
             preserve
                 clear
                 set obs 1
@@ -927,8 +847,6 @@ foreach c of local commodities {
                 save `results', replace
             restore
         }
-
-        * Clean up temporary variables before next iteration
         capture drop fin_std_temp
         capture drop d_gs1_x_fin_temp
 
@@ -936,14 +854,10 @@ foreach c of local commodities {
     }
 }
 
-********************************************************************************
-* SAVE RESULTS
-********************************************************************************
-
 use `results', clear
 sort commodity fin_measure horizon
 
-save "$input\DTA\lp_iv_gs1_interaction_ma12.dta", replace
+save "$dta\lp_iv_gs1_interaction_ma12.dta", replace
 
 di ""
 di "======================================================"
@@ -956,11 +870,9 @@ di "======================================================"
 list commodity fin_measure horizon beta_int kanzig_included ///
     in 1/10
 
-********************************************************************************
-* PLOT
-********************************************************************************
+**We now plot the results to visualize the outcome of the LP and evaluate their significance
 
-use "$input\DTA\lp_iv_gs1_interaction_ma12.dta", clear
+use "$dta\lp_iv_gs1_interaction_ma12.dta", clear
 
 local commodities "Coffee Copper Gold Oil Soybeans Wheat"
 local fm_list     "nc_gs_ma12 rolling_corr"

@@ -306,6 +306,43 @@ gen d_gs1 = gs1 - L.gs1
 
 save "$dta\gs1_prepared.dta", replace
 
+
+**** Kanzig oil shock (for robustness checks) 
+
+import excel "$input\oil supply shocks.xlsx", ///
+    sheet("Monthly") ///
+    firstrow ///
+    clear
+
+rename Date                date_str
+rename Oilsupply           oil_supply_dummy
+rename Oilsupplynewsshock  kanzig_shock
+
+gen date = monthly(date_str, "YM")
+format date %tm
+
+list date_str date in 1/5
+
+drop date_str
+
+* Define the cutoff to exclude the dates we don't need
+local cutoff = monthly("1994m1", "YM")
+
+count if date < `cutoff'
+di "Observations before January 1994 (to be dropped): " r(N)
+
+count if date >= `cutoff'
+di "Observations from January 1994 onward (to be kept): " r(N)
+
+drop if date < `cutoff'
+
+sum date
+di "Date range after trim: " %tm `=r(min)' " to " %tm `=r(max)'
+
+sort date
+tempfile kanzig
+save `kanzig'
+
 *** Merge everything into master data panel
 * prices_long.dta is the spine, so everything merges onto it
 
@@ -340,6 +377,8 @@ merge 1:1 commodity date using ///
 merge 1:1 commodity date using ///
     "$dta\sp500_corr_monthly.dta", ///
     keep(1 3) nogenerate
+
+merge m:1 date using `kanzig',    keep(1 3) nogenerate 
 
 * We replace missing shocks (Months with no FOMC meeting) with 0s
 replace shock = 0 if missing(shock)
@@ -404,6 +443,7 @@ di "=== master_panel_gs1.dta saved ==="
 
 
 **********************ANALYSIS 1 - BASELINE model (no interaction or subdivision)**********************
+
 ** Here we estimate the baseline local-projection model over the full sample period. 
 * The specification includes crisis-period dummy variables to control for unusual economic conditions during major crises, 
 * as well as the relevant macroeconomic and financialization controls. 
@@ -587,190 +627,13 @@ foreach c of local commodities {
 }
 
 
+******* VERIFICATION CHECKS BEFORE INTERACTION MODEL **************************
 
-****************************************************************
-* MERGE KÄNZIG OIL SUPPLY SHOCK INTO MASTER PANEL
-* Keep only dates from January 1994 onward
-****************************************************************
-
-****************************************************************
-* STEP 1: IMPORT AND CLEAN THE EXCEL FILE
-****************************************************************
-
-import excel "$input\oil supply shocks.xlsx", ///
-    sheet("Monthly") ///
-    firstrow ///
-    clear
-
-* Rename variables
-rename Date                date_str
-rename Oilsupply           oil_supply_dummy
-rename Oilsupplynewsshock  kanzig_shock
-
-* Check raw import
-list in 1/5
-describe
-
-****************************************************************
-* STEP 2: CONVERT DATE STRING TO STATA MONTHLY DATE
-****************************************************************
-
-gen date = monthly(date_str, "YM")
-format date %tm
-
-* Verify conversion
-list date_str date in 1/5
-
-drop date_str
-
-****************************************************************
-* STEP 3: DROP DATES BEFORE JANUARY 1994
-****************************************************************
-
-* Define cutoff
-local cutoff = monthly("1994m1", "YM")
-
-* Check how many observations will be dropped
-count if date < `cutoff'
-di "Observations before January 1994 (to be dropped): " r(N)
-
-count if date >= `cutoff'
-di "Observations from January 1994 onward (to be kept): " r(N)
-
-* Drop pre-1994 observations
-drop if date < `cutoff'
-
-* Verify date range after dropping
-sum date
-di "Date range after trim: " %tm `=r(min)' " to " %tm `=r(max)'
-
-****************************************************************
-* STEP 4: VERIFY NO DUPLICATES
-****************************************************************
-
-duplicates report date
-* Should show 0 duplicates
-
-sort date
-tempfile kanzig
-save `kanzig'
-
-****************************************************************
-* STEP 5: MERGE INTO MASTER PANEL — CORRECTED
-****************************************************************
-
-use "$input\DTA\master_panel_gs1.dta", clear
-
-sum date
-di "Master panel date range: " %tm `=r(min)' " to " %tm `=r(max)'
-di "Master panel observations: " _N
-
-sort date
-
-* Remove nogenerate so _merge variable is created for inspection
-merge m:1 date using `kanzig', ///
-    keep(master match)
-
-* Now tab works
-tab _merge
-
-* Rename for clarity before dropping
-rename _merge merge_kanzig
-
-* Diagnose unmatched
-count if merge_kanzig == 1
-di "Unmatched master obs (missing Känzig coverage): " r(N)
-
-* Check which dates are unmatched
-di "=== Unmatched dates ==="
-sum date if merge_kanzig == 1
-di "Unmatched range: " %tm `=r(min)' " to " %tm `=r(max)'
-
-* Confirm it is only end-of-sample dates
-list date if commodity == "Oil" & merge_kanzig == 1
-
-* Drop merge indicator — no longer needed
-drop merge_kanzig
-
-****************************************************************
-* STEP 6: VERIFY MERGE CORRECTNESS
-****************************************************************
-
-* Check shock values
-sum kanzig_shock, detail
-
-* Verify Oil gets correct values around OPEC episodes
-di "=== Oil shock values Jan-Jun 1999 ==="
-list date kanzig_shock if commodity == "Oil" & ///
-    date >= monthly("1999m1", "YM") & ///
-    date <= monthly("1999m6", "YM")
-
-* Verify same shock assigned to all commodities at same date
-di "=== All commodities March 1999 ==="
-list date commodity kanzig_shock if ///
-    date == monthly("1999m3", "YM")
-
-* Visual check — full sample
-twoway ///
-    (bar kanzig_shock date if commodity == "Oil", ///
-        barwidth(0.8) color(red%60)) ///
-    , ///
-    title("Känzig Oil Supply News Shock: Full Sample") ///
-    xtitle("Date") ytitle("Shock value") ///
-    xline(`=monthly("2004m1","YM")', ///
-        lcolor(navy) lpattern(dash)) ///
-    note("Navy = January 2004 financialization onset" ///
-         "Negative = supply cut surprise")
-graph export "$output\kanzig_shock_full.png", replace width(1600)
-
-****************************************************************
-* STEP 7: GENERATE LAGS
-****************************************************************
-
+use "$dta\master_panel_gs1.dta", clear
 xtset commodity_id date
 
-forvalues l = 0/4 {
-    if `l' == 0 {
-        gen lag0_kanzig = kanzig_shock
-        label variable lag0_kanzig "Känzig shock lag 0"
-    }
-    else {
-        gen lag`l'_kanzig = L`l'.kanzig_shock
-        label variable lag`l'_kanzig "Känzig shock lag `l'"
-    }
-}
-
-sum lag0_kanzig lag1_kanzig lag2_kanzig lag3_kanzig lag4_kanzig
-
-* Boundary check
-sort commodity_id date
-by commodity_id: list commodity date kanzig_shock lag1_kanzig ///
-    if _n <= 2
-
-****************************************************************
-* STEP 8: SAVE
-****************************************************************
-
-label variable kanzig_shock "Känzig (2022) oil supply news shock"
-
-save "$input\DTA\master_panel_gs1.dta", replace
-
-di "=== master_panel_gs1.dta updated with Känzig shocks ==="
-di "=== 36 end-of-sample obs have missing kanzig_shock ==="
-di "=== These will be excluded from regressions automatically ==="
-sum kanzig_shock lag0_kanzig lag1_kanzig
-
-
-********************************************************************************
-* VERIFICATION CHECKS BEFORE INTERACTION MODEL
-********************************************************************************
-
-use "$input\DTA\master_panel_gs1.dta", clear
-xtset commodity_id date
-
-********************************************************************************
 * CHECK 1: NC gross share is monthly mean (one obs per commodity-month)
-********************************************************************************
+
 
 di "=== CHECK 1: NC Gross Share — one obs per commodity-month ==="
 duplicates report commodity date
@@ -785,9 +648,7 @@ foreach c in Coffee Copper Gold Oil Soybeans Wheat {
     list date nc_gross_share if commodity == "`c'" in 1/5
 }
 
-********************************************************************************
 * CHECK 2: Rolling correlation coverage by commodity
-********************************************************************************
 
 di "=== CHECK 2: Rolling Correlation Coverage ==="
 tabstat rolling_corr, by(commodity) stat(n mean sd min max) nototal
@@ -808,16 +669,8 @@ foreach c in Coffee Copper Gold Oil Soybeans Wheat {
         in 1/3
 }
 
-********************************************************************************
-* CHECK 3: Sample truncation from nc_gs_ma12
-* The 12M MA requires 12 lags of monthly nc_gross_share
-* So effective start is pushed forward ~12 months relative to nc_gross_share
-********************************************************************************
-
-********************************************************************************
 * CHECK 4: Compare sample sizes between the two financialization measures
 * After applying L1 (one additional lag) as in the interaction model
-********************************************************************************
 
 di "=== CHECK 4: Effective sample sizes after L1 lag ==="
 
@@ -838,10 +691,8 @@ foreach c in Coffee Copper Gold Oil Soybeans Wheat {
     }
 }
 
-********************************************************************************
 * CHECK 5: Standardization preview
 * Show mean and SD that will be used in the interaction loop
-********************************************************************************
 
 di "=== CHECK 5: Standardization preview ==="
 
@@ -857,15 +708,13 @@ foreach c in Coffee Copper Gold Oil Soybeans Wheat {
 
 di "=== All checks complete — safe to proceed with interaction model ==="
 
-********************************************************************************
-* ANALYSIS 2 - INTERACTION MODEL — FINAL VERSION
-* Financialization standardized within each commodity separately
-* Oil includes Känzig oil supply shock control (lag 0-4)
-* All other commodities: standard specification
-* Endogenous: d_gs1 instrumented by Acosta shock
-********************************************************************************
+******************************* ANALYSIS 2 - INTERACTION MODEL **********************************************************
+* Financialization is standardized separately within each commodity.
+* The Oil specification includes contemporaneous and four lagged Känzig oil-supply shocks as additional controls.
+* All other commodities use the standard specification without these controls.
+* The endogenous variable, d_gs1, is instrumented using the Acosta monetary-policy shock.
 
-use "$input\DTA\master_panel_gs1.dta", clear
+use "$dta\master_panel_gs1.dta", clear
 xtset commodity_id date
 
 global lags    4
@@ -878,15 +727,13 @@ local curr_Oil      ""
 local curr_Soybeans "d_brl"
 local curr_Wheat    ""
 
-local commodities "Coffee Copper Gold Oil Soybeans Wheat"
+local commodities "Copper Gold Oil Soybeans Wheat"
 local fin_measures "nc_gs_ma12 rolling_corr"
 local fin_labels   `""NC Gross Share 12M MA (CFTC)" "SP500 Rolling Correlation (24M)""'
 
-********************************************************************************
-* PREPARE VARIABLES
-********************************************************************************
 
-* Generate smoothed NC gross share — drop first to avoid conflict
+***Preparatory work: dummy variables setting and financialization measure smoothing
+** We generate smoothed NC gross share and we drop first to avoid conflict
 capture drop nc_gross_share_ma12
 gen nc_gross_share_ma12 = (nc_gross_share + ///
     L1.nc_gross_share  + L2.nc_gross_share  + ///
@@ -899,29 +746,14 @@ gen nc_gross_share_ma12 = (nc_gross_share + ///
 capture drop nc_gs_ma12
 gen nc_gs_ma12 = nc_gross_share_ma12
 
-* Crisis dummies
+** Crisis dummies
 capture drop gfc covid ukraine
 gen gfc     = (date >= tm(2008m9)  & date <= tm(2009m6))
 gen covid   = (date >= tm(2020m3)  & date <= tm(2021m6))
 gen ukraine = (date >= tm(2022m2)  & date <= tm(2022m12))
 
-* Verify Känzig shock present for Oil specification
-capture confirm variable kanzig_shock
-if _rc {
-    di as error "ERROR: kanzig_shock not found in dataset"
-    di as error "Run the Känzig merge code before this analysis"
-    exit 111
-}
-else {
-    di "=== kanzig_shock confirmed present ==="
-    sum kanzig_shock if commodity == "Oil", detail
-}
-
-********************************************************************************
-* FIRST STAGE — runs on full time series
-* d_gs1 instrumented by Acosta shock
-* No controls in first stage — d_gs1 is macro variable
-********************************************************************************
+****IV FIRST STAGE 
+* d_gs1 (US 10-year treasury) is instrumented by Acosta shock to clean from endogenous component of monetary policy
 
 preserve
     duplicates drop date, force
@@ -949,24 +781,19 @@ preserve
     save `fittedvals'
 restore
 
-* Merge fitted values back into panel
 merge m:1 date using `fittedvals', nogenerate
 sort commodity_id date
 xtset commodity_id date
 
-* Create results file
 tempfile results
 preserve
     clear
     save `results', emptyok replace
 restore
 
-********************************************************************************
-* MAIN LOOP
-* - Standardization: commodity-specific (own mean and SD)
-* - Oil: adds Känzig shock lags 0-4 as supply shock control
-* - All other commodities: standard specification
-********************************************************************************
+
+**** MAIN REGRESSION LOOP
+**We regress commodity prices first differences on instrumented MP shock and controls in standard IV-LP setting. 
 
 foreach c of local commodities {
     foreach fm of local fin_measures {

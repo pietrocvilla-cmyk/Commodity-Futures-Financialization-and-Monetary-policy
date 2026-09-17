@@ -101,6 +101,6 @@ not an error).
 
 If you use this code or refer to this work, please cite:
 
-> [Author name] (2026). *Has Futures Markets Financialization Changed Monetary Policy
-> Transmission to Commodity Prices?* MSc Extended Essay (EC424), London School of
+> [Pietro Villa] (2026). *Has Futures Markets Financialization Changed Monetary Policy
+> Transmission to Commodity Prices?* MSc Thesis (EC424), London School of
 > Economics and Political Science.

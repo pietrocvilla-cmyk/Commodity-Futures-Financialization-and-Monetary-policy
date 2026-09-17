@@ -1,11 +1,11 @@
-########################################################################
-# LP-IV SUBSAMPLE COMPARISON - Time-cluster Block Bootstrap
-# PARSIMONIOUS SPECIFICATION:
-# - No currency controls
-# - Crisis dummy lags reduced from 4 to 2
-# - Block bootstrap (block length = 12 months)
-# Pre-financialization (1994-2007) vs Post-financialization (2010-2025)
-########################################################################
+#################################### LP-IV BLOCK BOOTSTRAP ###################################
+## Comparing monetary-policy transmission before and after financialization
+# Pre-period: 1994-2007 | Post-period: 2010-2025. We use time-cluster bootstrapping to get 
+# significant results given the dependency of data in the two time periods.
+# Specification: we run a simplified version (less lags and controls)
+# of the baseline model (less lags and controls, in order to earn degrees of freedom given the 
+# reduction in observation due to sample split) in both periods and take the 
+# difference of the IRFs. 
 
 library(haven)
 library(dplyr)
@@ -16,14 +16,13 @@ library(lmtest)
 library(purrr)
 library(lubridate)
 
-input  <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\02 Data\\DTA"
-output <- "C:\\Users\\pitvi\\OneDrive\\Documenti\\03 LSE\\03 Dissertation\\04 Output - figures and tables\\04 bootstrapping\\"
+## Path setting - all paths are relative and adjust automatically, as long as you download 
+# the whole repository locally and open the Rproj file first as instructed
 
-if (!dir.exists(output)) dir.create(output, recursive = TRUE)
+input  <- "Data/DTA/"
+output <- "Output/03 Bootstrap"
 
-########################################################################
-# LOAD DATA
-########################################################################
+### LOAD DATA
 
 df <- read_dta(paste0(input, "\\master_panel_gs1.dta"))
 
@@ -48,9 +47,8 @@ df <- df %>%
                            date <= as.Date("2022-12-01"))
   )
 
-########################################################################
-# PARAMETERS
-########################################################################
+
+### PARAMETERS SETTING 
 
 lags         <- 4       # kept at 4 for comparability with baseline
 crisis_lags  <- 2       # reduced from 4
@@ -58,11 +56,10 @@ block_length <- 12      # block bootstrap block length in months
 breps        <- 500
 horizon      <- 24
 
-commodities <- c("Coffee", "Copper", "Gold", "Oil", "Soybeans", "Wheat")
+commodities <- c("Copper", "Gold", "Oil", "Soybeans", "Wheat")
 
-# No currency controls in parsimonious specification
+## Note that we do not include currency controls in parsimonious specification
 crisis_vars <- list(
-  Coffee   = c("gfc", "covid"),
   Copper   = c("gfc", "covid"),
   Gold     = c("gfc", "covid"),
   Oil      = c("gfc", "covid", "ukraine"),
@@ -75,10 +72,7 @@ pre_end    <- as.Date("2007-12-01")
 post_start <- as.Date("2010-01-01")
 post_end   <- as.Date("2025-12-01")
 
-########################################################################
-# PRE-COMPUTE LAGS
-# Currency lags removed — only price, macro, and crisis lags needed
-########################################################################
+### PRE-COMPUTE VARIABLE LAGS
 
 cat("=== Pre-computing lags ===\n")
 
@@ -113,9 +107,7 @@ df <- df %>%
 
 cat("Pre-computation done. Columns:", ncol(df), "\n")
 
-########################################################################
-# FIRST STAGE
-########################################################################
+### IV FIRST STAGE 
 
 cat("=== Running first stages ===\n")
 
@@ -164,10 +156,7 @@ df <- df %>%
 
 cat("\nFirst stage fitted values merged.\n")
 
-########################################################################
-# SECOND STAGE HELPER
-# Parsimonious: no currency controls, crisis_lags = 2
-########################################################################
+### SECOND STAGE HELPER
 
 run_second_stage <- function(data, commodity_name, h,
                              crisis_v, sub_start, sub_end,
@@ -187,7 +176,7 @@ run_second_stage <- function(data, commodity_name, h,
   
   d$d_gs1_hat <- d[[fitted_col]]
   
-  # Core controls — no currency
+  # Core controls
   core_controls <- c(
     paste0("lag", 1:lags, "_dlp"),
     paste0("lag", 1:lags, "_ip_growth"),
@@ -230,9 +219,8 @@ run_second_stage <- function(data, commodity_name, h,
   }, error = function(e) NULL)
 }
 
-########################################################################
-# STEP 1: POINT ESTIMATES
-########################################################################
+### POINT ESTIMATES 
+## We first estimate pre- and post-financialization LP-IV responses and their difference
 
 cat("\n=== Computing point estimates ===\n")
 
@@ -280,10 +268,8 @@ point_df <- bind_rows(point_estimates)
 cat("Point estimates computed:", nrow(point_df), "rows\n")
 print(head(point_df))
 
-########################################################################
-# STEP 2: BLOCK BOOTSTRAP
-# Resample contiguous blocks of months separately for each subsample
-########################################################################
+### BLOCK BOOTSTRAP
+## Resample 12-month blocks separately within the pre- and post-periods
 
 cat("\n=== Running block bootstrap (B =", breps,
     ", block =", block_length, "months) ===\n")
@@ -302,7 +288,6 @@ nT_post <- length(dates_post)
 cat("Pre-period unique dates:",  nT_pre,  "\n")
 cat("Post-period unique dates:", nT_post, "\n")
 
-# ---- Block resampling helper ----
 resample_blocks <- function(dates, n_obs, block_len) {
   
   # Starting indices for valid blocks
@@ -391,9 +376,11 @@ if (nrow(boot_df_results) == 0) {
   stop("Bootstrap produced no results")
 }
 
-########################################################################
-# STEP 3: CONFIDENCE BANDS
-########################################################################
+### CONFIDENCE BANDS COMPUTATION
+## We use the bootstrap distributions to calculate 68% and 90% confidence
+# bands for the pre-period response, post-period response, and their
+# post-minus-pre difference at each horizon and for each commodity.
+
 
 cat("=== Computing confidence bands ===\n")
 
@@ -416,9 +403,6 @@ boot_bands <- boot_df_results %>%
     .groups = "drop"
   )
 
-########################################################################
-# STEP 4: MERGE AND SAVE
-########################################################################
 
 final_df <- point_df %>%
   left_join(boot_bands, by = c("commodity", "horizon"))
@@ -431,30 +415,9 @@ write.csv(
 
 cat("=== Saved lp_iv_subsample_bootstrap_parsimonious.csv ===\n")
 
-########################################################################
-# STEP 5: SAMPLE SIZE REPORT
-# Check degrees of freedom gained vs original specification
-########################################################################
+#### IRF PLOTS
 
-cat("\n=== Sample size and regressor count check ===\n")
-
-for (c in commodities) {
-  n_crisis  <- length(crisis_vars[[c]]) * (crisis_lags + 1)
-  n_core    <- lags * 3          # dlp + ip_growth + inflation
-  n_total   <- 1 + n_core + n_crisis + 1   # intercept + core + crisis + d_gs1_hat
-  cat(c, "— regressors:", n_total,
-      "| pre obs at h=24 approx:", nT_pre - 24 - lags,
-      "| post obs at h=24 approx:", nT_post - 24 - lags, "\n")
-}
-
-cat("\n=== Done ===\n")
-
-########### PLOT
-
-# ---- Load new parsimonious results ----
 boot <- read.csv(paste0(input, "\\lp_iv_subsample_bootstrap_parsimonious.csv"))
-
-# ---- Reuse existing plotting code ----
 
 # Difference patched figure (all commodities)
 y_min_diff <- boot %>%

@@ -15,11 +15,8 @@ library(haven)
 file_path  <- "Data/Financialization of commodities/Financialization measures 1990-2025.xlsx"
 sp500_path <- "Data/S&P 500 time series.xlsx"
 comm_path  <- "Data/Commodity prices/Commodity prices.xlsx"
-fig_path   <- "Output/Descriptives/"
+fig_path   <- "Output/00 Descriptives/"
 dta_path <- "Data/DTA/"
-
-dir.create(fig_path,    showWarnings = FALSE, recursive = TRUE)
-dir.create(output_path, showWarnings = FALSE, recursive = TRUE)
 
 required_files <- c(file_path, sp500_path, comm_path)
 missing_files <- required_files[!file.exists(required_files)]
@@ -150,7 +147,11 @@ compute_from_sheet <- function(sheet_name) {
     mutate(month = floor_date(report_date, "month")) %>%
     group_by(month) %>%
     summarise(nc_gross_share = mean(nc_gross_share, na.rm = TRUE), .groups = "drop") %>%
-    transmute(commodity = sheet_name, report_date = month, nc_gross_share)
+    transmute(
+  commodity = recode(sheet_name, "Crude oil" = "Oil", "Soybean" = "Soybeans"),
+  report_date = month,
+  nc_gross_share
+)
 }
 
 # Build dataset

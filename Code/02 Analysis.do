@@ -1641,14 +1641,14 @@ list commodity fin_measure horizon beta_int se_int in 1/12
 
 ***** We plot the results to evaluate the significance of the coefficients
 
-use "$dta\lp_iv_placebo_gpr_interaction.dta", clear
+use "$dta/lp_iv_placebo_gpr_interaction.dta", clear
 
 local commodities "Coffee Copper Gold Oil Soybeans Wheat"
 local fm_list     "nc_gs_ma12 rolling_corr"
 local fin_labels  `""NC Gross Share 12M MA (CFTC)" "SP500 Rolling Correlation (24M)""'
 local n : word count `fm_list'
 
-capture mkdir `"$output\06 Robustnness checks"'
+capture mkdir `"$output/06 Robustnness checks"'
 
 foreach c of local commodities {
     forvalues i = 1/`n' {
@@ -1678,7 +1678,7 @@ foreach c of local commodities {
             note("Monetary shock (d_gs1_hat) controlled for, not interacted" ///
                  "Shaded areas = 68% and 90% CI, Newey-West SE")
 
-        local outpath `"$output\04 Robustness Checks"'
+        local outpath `"$output/04 Robustness Checks"'
         graph export ///
             `"`outpath'\irf_`c'_placebo_gpr_`fm'.png"', ///
             replace width(2000)

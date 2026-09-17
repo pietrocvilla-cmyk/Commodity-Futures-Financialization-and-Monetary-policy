@@ -62,9 +62,7 @@ Stata has no equivalent auto-detection mechanism. At the top of `Data cleaning.d
 global root "C:/Users/yourname/path-to-this-repo"
 ```
 
-to point to wherever you cloned this repository. Use forward slashes (`/`), even on
-Windows — this keeps the path portable across operating systems. Every other path in the
-Stata code is built from this single global, so nothing else needs to be edited.
+to point to wherever you cloned this repository. 
 
 ## Data Sources
 

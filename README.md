@@ -28,7 +28,6 @@ The repository is organized as follows:
   - `01 Financialization measures creation.R` - Builds the two financialization measures
   - `02 Analysis.do` - Cleans, merges, and constructs the LP-IV dependent variables
   - `03 Parsimonious bootstrapping.R` - Pre/post subsample bootstrap comparison (reported in the thesis)
-  - *(additional scripts, e.g. the full bootstrap or IRF plotting code, may also be present — see the folder itself for the complete list)*
 - `data/` - Contains all raw and intermediate data files
   - `Commodity prices/` - LSEG — manual download required
   - `Controls/` - Industrial production, inflation, exchange rates (FRED, downloaded automatically)
